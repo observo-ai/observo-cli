@@ -80,11 +80,21 @@ func TestParse_FailureTakesPrecedenceOverSkipped(t *testing.T) {
 	}
 }
 
-func TestParse_NoTestcasesIsError(t *testing.T) {
-	x := `<testsuite></testsuite>`
-	_, err := Parse(strings.NewReader(x))
-	if err == nil {
-		t.Fatal("expected error on no <testcase>")
+func TestParse_NoTestcasesIsZeroAggregate(t *testing.T) {
+	// Vitest with all-skipped files, gotestsum with non-matching -run
+	// regex, Playwright with empty grep, etc. all emit <testsuite/>
+	// without children. Pre-fix this errored, failing CI for a
+	// legitimately empty run.
+	x := `<testsuite tests="0"></testsuite>`
+	agg, err := Parse(strings.NewReader(x))
+	if err != nil {
+		t.Fatalf("empty testsuite should NOT error; got: %v", err)
+	}
+	if agg.Total != 0 || agg.Passed != 0 || agg.Failed != 0 {
+		t.Errorf("zero-test run aggregate: %+v", agg)
+	}
+	if agg.Outcome() != "passed" {
+		t.Errorf("zero-test Outcome should be 'passed'; got %q", agg.Outcome())
 	}
 }
 

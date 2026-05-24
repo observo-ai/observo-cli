@@ -81,7 +81,10 @@ func TestUpdateRunCase_RejectsInvalidStatus(t *testing.T) {
 	}
 }
 
-func TestEnsureAndUpdateRunCase_CallsBatchAddThenPatch(t *testing.T) {
+func TestEnsureAndUpdateRunCase_PatchesDirectly_NoBatchAdd(t *testing.T) {
+	// Post-review fixup: batch_add removed from this wrapper because the
+	// server's batch_add RPC requires UUIDs + JWT-only auth, breaking the
+	// short-code + API-key path the CLI relies on. We now PATCH directly.
 	var batchAdds, patches atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
@@ -98,24 +101,20 @@ func TestEnsureAndUpdateRunCase_CallsBatchAddThenPatch(t *testing.T) {
 	if err := c.EnsureAndUpdateRunCase(context.Background(), "r1", "OB-50", "passed"); err != nil {
 		t.Fatalf("EnsureAndUpdateRunCase: %v", err)
 	}
-	if batchAdds.Load() != 1 {
-		t.Errorf("batch_add calls: got %d, want 1", batchAdds.Load())
+	if batchAdds.Load() != 0 {
+		t.Errorf("batch_add must NOT run anymore; got %d calls", batchAdds.Load())
 	}
 	if patches.Load() != 1 {
 		t.Errorf("PATCH calls: got %d, want 1", patches.Load())
 	}
 }
 
-func TestEnsureAndUpdateRunCase_BatchAddFailureStopsPatch(t *testing.T) {
-	var patches atomic.Int32
+func TestEnsureAndUpdateRunCase_404HintsAtServerLimitation(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasSuffix(r.URL.Path, ":batch_add") {
-			w.WriteHeader(http.StatusBadRequest)
-			_, _ = w.Write([]byte(`{"error":"no such case"}`))
-			return
-		}
-		patches.Add(1)
-		w.WriteHeader(http.StatusOK)
+		// PATCH returns 404 when the case isn't attached to the run.
+		// Wrapper should turn that into a hint about the known limitation.
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"error":"run case not found"}`))
 	}))
 	defer srv.Close()
 
@@ -125,10 +124,10 @@ func TestEnsureAndUpdateRunCase_BatchAddFailureStopsPatch(t *testing.T) {
 
 	err := c.EnsureAndUpdateRunCase(context.Background(), "r1", "MISSING-99", "passed")
 	if err == nil {
-		t.Fatal("expected err to surface from batch_add 4xx")
+		t.Fatal("expected error on 404")
 	}
-	if patches.Load() != 0 {
-		t.Errorf("PATCH should NOT run after batch_add fails; calls=%d", patches.Load())
+	if !strings.Contains(err.Error(), "pre-attach") {
+		t.Errorf("error should hint at the pre-attach limitation; got: %v", err)
 	}
 }
 

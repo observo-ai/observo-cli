@@ -3,6 +3,8 @@ package api
 import (
 	"errors"
 	"fmt"
+	"net"
+	"syscall"
 )
 
 // HTTPError is returned for non-2xx responses from the Observo API.
@@ -34,20 +36,40 @@ func (e *HTTPError) IsRetryable() bool {
 	}
 }
 
-// IsRetryable returns true for any error that can be retried — wraps the
-// HTTPError-aware variant for use with non-HTTP errors (network blips,
-// context.DeadlineExceeded, etc.).
+// IsRetryable returns true ONLY for errors that are known to be transient.
+// Previously this whitelisted HTTPErrors via the IsRetryable method but
+// then default-true'd everything else — meaning malformed BaseURLs,
+// JSON decode failures, and other permanent errors got 3× backoff
+// retries (~14s of dead time before surfacing to the user). The new
+// shape is whitelist-only: HTTPError per its own predicate, classic
+// network errors (timeout / temporary), and nothing else.
 func IsRetryable(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, errCtxCancelled) {
+		return false
+	}
 	var herr *HTTPError
 	if errors.As(err, &herr) {
 		return herr.IsRetryable()
 	}
-	// Network errors (DNS, dial timeout, TLS handshake) — retry.
-	// Skip context cancellation: the caller asked to stop.
-	if errors.Is(err, errCtxCancelled) {
-		return false
+	// net.Error covers DNS failures, connection refused, TLS handshake
+	// resets, deadline exceeded — all transient. Other error types
+	// (json.SyntaxError, url.Error wrapping a non-net cause, etc.) are
+	// permanent and should not retry.
+	var nerr net.Error
+	if errors.As(err, &nerr) {
+		if nerr.Timeout() {
+			return true
+		}
 	}
-	return err != nil
+	// Connection-level errors that the stdlib doesn't surface as
+	// net.Error but are transient: ECONNREFUSED, ECONNRESET.
+	if errors.Is(err, syscall.ECONNREFUSED) || errors.Is(err, syscall.ECONNRESET) {
+		return true
+	}
+	return false
 }
 
 // errCtxCancelled is a sentinel for context.Canceled mapped through Do —

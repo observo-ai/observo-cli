@@ -4,8 +4,6 @@ import (
 	"bytes"
 	"encoding/json"
 	"io"
-	"mime"
-	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -49,26 +47,28 @@ func (f *fakeObservoServer) handler(t *testing.T) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case strings.HasSuffix(r.URL.Path, "/attachments:upload"):
+			// Post-fix: attachments are JSON+base64 (server gateway has
+			// no multipart marshaler). Read JSON body, echo the filename
+			// into the attachment id so tests can verify which file was
+			// uploaded.
 			f.uploads.Add(1)
-			_, params, _ := mime.ParseMediaType(r.Header.Get("Content-Type"))
-			mr := multipart.NewReader(r.Body, params["boundary"])
-			fileName := ""
-			for {
-				p, err := mr.NextPart()
-				if err == io.EOF {
-					break
-				}
-				if err != nil {
-					t.Fatalf("multipart: %v", err)
-				}
-				if p.FormName() == "file" {
-					fileName = p.FileName()
-				}
-				_, _ = io.Copy(io.Discard, p)
+			body, _ := io.ReadAll(r.Body)
+			var req struct {
+				FileName string `json:"file_name"`
+				Content  string `json:"content"`
+			}
+			if err := json.Unmarshal(body, &req); err != nil {
+				t.Fatalf("upload body not JSON: %v\n%s", err, body)
+			}
+			if req.FileName == "" {
+				t.Errorf("upload missing file_name")
+			}
+			if req.Content == "" {
+				t.Errorf("upload missing content (base64)")
 			}
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(map[string]any{
-				"attachment": map[string]any{"id": "att-" + fileName},
+				"attachment": map[string]any{"id": "att-" + req.FileName},
 			})
 
 		case strings.Contains(r.URL.Path, "/pipeline/layers/"):

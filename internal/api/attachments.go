@@ -1,18 +1,15 @@
 package api
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
-	"mime/multipart"
 	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
-	"time"
 )
 
 // Attachment is the subset of the server's Attachment shape the CLI needs.
@@ -31,21 +28,41 @@ type UploadAttachmentRequest struct {
 	RunCaseStepID string
 }
 
-// UploadResponse mirrors the server envelope.
+// uploadBody mirrors the server's UploadAttachmentRequest proto. The
+// server's grpc-gateway pipeline accepts ONLY JSON (no multipart
+// marshaler registered in main.go's runGatewayServer), so the file is
+// base64-encoded into `content`. proto `bytes content` rule:
+// protojson encodes bytes as standard base64. Field names use
+// snake_case (server uses UseProtoNames=true on the marshaler).
+type uploadBody struct {
+	ProjectID     string `json:"project_id"`
+	RunID         string `json:"run_id,omitempty"`
+	RunCaseID     string `json:"run_case_id,omitempty"`
+	RunCaseStepID string `json:"run_case_step_id,omitempty"`
+	FileName      string `json:"file_name"`
+	ContentType   string `json:"content_type,omitempty"`
+	Content       string `json:"content"` // base64-std-encoded file bytes
+}
+
 type uploadResponse struct {
 	Attachment Attachment `json:"attachment"`
 }
 
-// UploadAttachment posts the file via multipart/form-data to
+// UploadAttachment posts the file as JSON+base64 to
 // POST /api/projects/{project_id}/attachments:upload.
-// Returns the created attachment (ID is what callers actually need to
-// splice into pipeline_layer.{junit,coverage}_attachment_id).
 //
-// The retry path goes through DoMultipart, NOT DoJSON — multipart bodies
-// can't replay through the same retry hook (Body is a one-shot reader).
-// We pre-buffer into memory; with our sub-MB lcov/junit files that's
-// fine. If we ever ship attachments > 100MB, switch to streaming + retry
-// by re-opening the file.
+// Earlier the CLI used multipart/form-data — that matched the upstream
+// upload-pipeline-action's shape, but the server's gRPC-gateway uses
+// the default JSONPb marshaler (server/main.go:393) with no multipart
+// registration, so multipart requests fail with 415 Unsupported Media
+// Type. The upstream action's uploads were silently swallowed by
+// `curl -sS ... || warning` — verified by inspecting production runs
+// with zero attachment IDs spliced into pipeline.layers.
+//
+// JSON+base64 ~ 4/3× the file's raw byte size; for our junit/lcov
+// (sub-MB) the cost is negligible. If a future use case ships >50MB
+// attachments, switch to a dedicated multipart server endpoint instead
+// (requires a server-side handler registered outside the gateway).
 func (c *Client) UploadAttachment(ctx context.Context, req UploadAttachmentRequest) (*Attachment, error) {
 	if req.ProjectID == "" {
 		return nil, errors.New("UploadAttachment: project_id required")
@@ -54,15 +71,31 @@ func (c *Client) UploadAttachment(ctx context.Context, req UploadAttachmentReque
 		return nil, errors.New("UploadAttachment: file_path required")
 	}
 
-	body, contentType, err := buildMultipart(req)
+	f, err := os.Open(req.FilePath)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("open %s: %w", req.FilePath, err)
+	}
+	defer f.Close()
+
+	raw, err := io.ReadAll(f)
+	if err != nil {
+		return nil, fmt.Errorf("read %s: %w", req.FilePath, err)
+	}
+
+	body := uploadBody{
+		ProjectID:     req.ProjectID,
+		RunID:         req.RunID,
+		RunCaseID:     req.RunCaseID,
+		RunCaseStepID: req.RunCaseStepID,
+		FileName:      filepath.Base(req.FilePath),
+		ContentType:   detectContentType(req.FilePath, raw),
+		Content:       base64.StdEncoding.EncodeToString(raw),
 	}
 
 	path := "/api/projects/" + url.PathEscape(req.ProjectID) + "/attachments:upload"
 
 	var resp uploadResponse
-	if err := c.doMultipart(ctx, "POST", path, body, contentType, &resp); err != nil {
+	if err := c.DoJSON(ctx, "POST", path, body, &resp); err != nil {
 		return nil, err
 	}
 	if resp.Attachment.ID == "" {
@@ -71,123 +104,27 @@ func (c *Client) UploadAttachment(ctx context.Context, req UploadAttachmentReque
 	return &resp.Attachment, nil
 }
 
-// buildMultipart streams the file + form fields into an in-memory buffer.
-// Returns the buffer + the Content-Type header value (which carries the
-// random boundary token mime/multipart generates).
-func buildMultipart(req UploadAttachmentRequest) (*bytes.Buffer, string, error) {
-	f, err := os.Open(req.FilePath)
-	if err != nil {
-		return nil, "", fmt.Errorf("open %s: %w", req.FilePath, err)
-	}
-	defer f.Close()
-
-	var buf bytes.Buffer
-	mw := multipart.NewWriter(&buf)
-
-	if req.RunID != "" {
-		if err := mw.WriteField("run_id", req.RunID); err != nil {
-			return nil, "", err
+// detectContentType infers a content_type for the upload body. Uses the
+// stdlib http.DetectContentType (sniffs first 512 bytes) and falls back
+// to filename extension for text formats it can't tell apart (junit
+// XML, lcov text, etc.). Server doesn't strictly require this — it's a
+// hint for the dashboard's download UX.
+func detectContentType(name string, body []byte) string {
+	switch ext := filepath.Ext(name); ext {
+	case ".lcov", ".info":
+		return "text/plain; charset=utf-8"
+	case ".xml":
+		return "application/xml"
+	case ".html", ".htm":
+		return "text/html; charset=utf-8"
+	case ".json":
+		return "application/json"
+	case ".md", ".txt":
+		return "text/plain; charset=utf-8"
+	default:
+		if len(body) == 0 {
+			return "application/octet-stream"
 		}
+		return http.DetectContentType(body)
 	}
-	if req.RunCaseID != "" {
-		if err := mw.WriteField("run_case_id", req.RunCaseID); err != nil {
-			return nil, "", err
-		}
-	}
-	if req.RunCaseStepID != "" {
-		if err := mw.WriteField("run_case_step_id", req.RunCaseStepID); err != nil {
-			return nil, "", err
-		}
-	}
-
-	fw, err := mw.CreateFormFile("file", filepath.Base(req.FilePath))
-	if err != nil {
-		return nil, "", err
-	}
-	if _, err := io.Copy(fw, f); err != nil {
-		return nil, "", fmt.Errorf("copy file body: %w", err)
-	}
-	if err := mw.Close(); err != nil {
-		return nil, "", err
-	}
-	return &buf, mw.FormDataContentType(), nil
 }
-
-// doMultipart is the multipart sibling of DoJSON. Same retry logic;
-// different content-type header; pre-buffered body (no streaming retry).
-func (c *Client) doMultipart(ctx context.Context, method, path string, body *bytes.Buffer, contentType string, out any) error {
-	url := c.baseURL + path
-
-	// Snapshot the bytes so each retry attempt gets a fresh reader.
-	raw := body.Bytes()
-
-	var lastErr error
-	wait := c.InitialWait
-	for attempt := 0; attempt <= c.MaxRetries; attempt++ {
-		if attempt > 0 {
-			c.logf("retry %d/%d after %s (prev err: %v)", attempt, c.MaxRetries, wait, lastErr)
-			select {
-			case <-ctx.Done():
-				return mapCtxErr(ctx)
-			case <-time.After(wait):
-			}
-			wait *= 2
-			if wait > c.MaxWait {
-				wait = c.MaxWait
-			}
-		}
-		err := c.doMultipartOnce(ctx, method, url, raw, contentType, out)
-		if err == nil {
-			return nil
-		}
-		lastErr = err
-		if !IsRetryable(err) {
-			return err
-		}
-	}
-	return fmt.Errorf("after %d retries: %w", c.MaxRetries, lastErr)
-}
-
-func (c *Client) doMultipartOnce(ctx context.Context, method, url string, body []byte, contentType string, out any) error {
-	req, err := http.NewRequestWithContext(ctx, method, url, bytes.NewReader(body))
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Authorization", "Bearer "+c.apiKey)
-	req.Header.Set("Content-Type", contentType)
-	req.Header.Set("Accept", "application/json")
-	if c.userAgent != "" {
-		req.Header.Set("User-Agent", c.userAgent)
-	}
-
-	c.logf("→ %s %s (multipart, body=%d bytes)", method, url, len(body))
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		if ctx.Err() != nil {
-			return mapCtxErr(ctx)
-		}
-		return err
-	}
-	defer resp.Body.Close()
-
-	respBody, readErr := io.ReadAll(io.LimitReader(resp.Body, BodyMaxLen+1))
-	if readErr != nil {
-		return fmt.Errorf("read response: %w", readErr)
-	}
-	c.logf("← %d %s (body=%d bytes)", resp.StatusCode, url, len(respBody))
-
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return &HTTPError{
-			StatusCode: resp.StatusCode,
-			URL:        url,
-			Body:       truncate(string(respBody), BodyMaxLen),
-		}
-	}
-	if out != nil && len(respBody) > 0 {
-		if err := json.Unmarshal(respBody, out); err != nil {
-			return fmt.Errorf("decode response: %w", err)
-		}
-	}
-	return nil
-}
-

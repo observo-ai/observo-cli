@@ -74,8 +74,11 @@ func TestRunCaseSet_EnsureThenPatchE2E(t *testing.T) {
 	if err := rootCmd.Execute(); err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
-	if batchCalls.Load() != 1 || patchCalls.Load() != 1 {
-		t.Errorf("expected 1 batch_add + 1 PATCH; got batch=%d patch=%d", batchCalls.Load(), patchCalls.Load())
+	// Post-fix: batch_add removed from EnsureAndUpdateRunCase because the
+	// server's batch_add requires UUID + JWT-only auth (incompatible with
+	// short codes + API key the CLI sends). Expect ONLY a PATCH.
+	if batchCalls.Load() != 0 || patchCalls.Load() != 1 {
+		t.Errorf("expected 0 batch_add + 1 PATCH (batch_add removed); got batch=%d patch=%d", batchCalls.Load(), patchCalls.Load())
 	}
 	if !strings.Contains(lastPatchBody, `"status":"failed"`) {
 		t.Errorf("PATCH body: %s", lastPatchBody)
