@@ -110,6 +110,26 @@ func Save(path string, s *State) error {
 	return nil
 }
 
+// RecordLayer is a load-modify-save helper used by `run pipeline-layer set`
+// to add/update a layer entry without race-prone manual JSON edits.
+// Tolerates a missing file (creates one with just the layer entry).
+// Caller is responsible for providing project_id + run_id if the file is
+// new (otherwise leaves them empty for `run finish` to error on).
+func RecordLayer(path, layerID, status string) error {
+	s, err := Load(path)
+	if err != nil {
+		if !errors.Is(err, ErrNotFound) {
+			return err
+		}
+		s = &State{}
+	}
+	if s.Layers == nil {
+		s.Layers = make(map[string]LayerState, 4)
+	}
+	s.Layers[layerID] = LayerState{Status: status}
+	return Save(path, s)
+}
+
 // DeriveStatus reduces accumulated layer outcomes to a single run status:
 //   - any layer failed → "failed"
 //   - any layer aborted → "aborted"  (precedence: aborted > failed > passed)
