@@ -62,7 +62,13 @@ func TestUploadAttachment_PostsJSONWithBase64Content(t *testing.T) {
 	if err := json.Unmarshal([]byte(gotBody), &body); err != nil {
 		t.Fatalf("body is not JSON: %v\n%s", err, gotBody)
 	}
-	if body.ProjectID != "OB" || body.RunID != "r1" || body.FileName != "sample.lcov" {
+	// project_id is intentionally NOT in the JSON body — it's carried
+	// by the URL path. Including it in body would trigger grpc-gateway
+	// v2's "field already bound to URL path parameter" rejection.
+	if strings.Contains(gotBody, "project_id") {
+		t.Errorf("body must not contain project_id (URL path already binds it); got: %s", gotBody)
+	}
+	if body.RunID != "r1" || body.FileName != "sample.lcov" {
 		t.Errorf("body metadata: %+v", body)
 	}
 	decoded, err := base64.StdEncoding.DecodeString(body.Content)

@@ -34,8 +34,14 @@ type UploadAttachmentRequest struct {
 // base64-encoded into `content`. proto `bytes content` rule:
 // protojson encodes bytes as standard base64. Field names use
 // snake_case (server uses UseProtoNames=true on the marshaler).
+//
+// project_id is NOT a field here on purpose. The proto's HTTP binding
+// is `post: "/api/projects/{project_id}/attachments:upload"` with
+// `body: "*"`. grpc-gateway v2 rejects requests where a field bound
+// to a URL path segment also appears in the JSON body ("field already
+// bound to URL path parameter"). The URL path is the source of truth
+// for project_id.
 type uploadBody struct {
-	ProjectID     string `json:"project_id"`
 	RunID         string `json:"run_id,omitempty"`
 	RunCaseID     string `json:"run_case_id,omitempty"`
 	RunCaseStepID string `json:"run_case_step_id,omitempty"`
@@ -83,7 +89,6 @@ func (c *Client) UploadAttachment(ctx context.Context, req UploadAttachmentReque
 	}
 
 	body := uploadBody{
-		ProjectID:     req.ProjectID,
 		RunID:         req.RunID,
 		RunCaseID:     req.RunCaseID,
 		RunCaseStepID: req.RunCaseStepID,
