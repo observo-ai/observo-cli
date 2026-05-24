@@ -65,6 +65,33 @@ func TestSave_CreatesParentDirs(t *testing.T) {
 	}
 }
 
+func TestRecordLayer_CreatesFileIfMissingThenAppends(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "s.json")
+	if err := RecordLayer(path, "frontend-unit", "passed"); err != nil {
+		t.Fatalf("RecordLayer (missing): %v", err)
+	}
+	if err := RecordLayer(path, "server-unit", "failed"); err != nil {
+		t.Fatalf("RecordLayer (append): %v", err)
+	}
+	s, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.Layers["frontend-unit"].Status != "passed" || s.Layers["server-unit"].Status != "failed" {
+		t.Errorf("layers: %+v", s.Layers)
+	}
+}
+
+func TestRecordLayer_OverwritesExistingEntry(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "s.json")
+	_ = RecordLayer(path, "x", "passed")
+	_ = RecordLayer(path, "x", "failed")
+	s, _ := Load(path)
+	if s.Layers["x"].Status != "failed" {
+		t.Errorf("overwrite failed: %+v", s.Layers)
+	}
+}
+
 func TestDeriveStatus(t *testing.T) {
 	tests := []struct {
 		name string
