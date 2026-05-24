@@ -5,7 +5,7 @@ CLI for pushing CI test runs, coverage, and live test status to [Observo](https:
 [![Release](https://img.shields.io/github/v/release/observo-ai/observo-cli)](https://github.com/observo-ai/observo-cli/releases)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue)](LICENSE)
 
-> **v0.1.0 is a stub release** — the binary prints `--version` and `--help` so we can verify every distribution channel resolves correctly. Real subcommands ship in v0.2.0 (`run create`, `run case set`, `run attach`, `run pipeline-layer set`, `plan resolve`). See [OB-336](https://dineviser.atlassian.net/browse/OB-336) for the surface.
+> **v0.2.0 (OB-B) ships the CLI foundation:** cobra command tree, `OBSERVO_API_KEY` env wiring, retry-aware HTTP client, `--json` output mode. The functional subcommands (`run create`, `run case set`, `run attach`, `run pipeline-layer set`, `plan resolve`) land per-subcommand in v0.3.0..v0.7.0 (OB-C..F). See [OB-336](https://dineviser.atlassian.net/browse/OB-336).
 
 ## Install
 
@@ -37,24 +37,32 @@ Other channels follow each tool's native pinning (`brew install observo-ai/tap/o
 ## Usage (preview)
 
 ```text
-observo <command> [flags]
+observo <command> [global flags]
 
-COMMANDS (v0.1.0):
+COMMANDS (v0.2.0):
   version      Print version, commit, build date
   help         Show this help
 
-COMMANDS (planned v0.2.0):
-  run create        Create a TestRun from a regression plan
-  run finish        Mark a run passed/failed/aborted
-  run case set      PATCH a run-case status by short code
-  run attach        Upload an artifact (junit, lcov, html) to a run
-  run pipeline-layer set
-                    Set aggregate stats + attachment IDs for a CI layer
-  plan resolve      Read a plan and emit short codes or Playwright --grep regex
+COMMANDS (planned v0.3.0..v0.7.0, OB-C..F):
+  run create               Create a TestRun from a regression plan
+  run finish               Mark a run passed/failed/aborted
+  run case set             PATCH a run-case status by short code
+  run case step set        PATCH a single step's status (live e2e reporter)
+  run attach               Upload an artifact (junit, lcov, html) to a run
+  run pipeline-layer set   Set aggregate stats + attachment IDs for a CI layer
+  plan resolve             Read a plan → emit short codes or Playwright --grep regex
+
+GLOBAL FLAGS:
+  --api-key string    Observo API key (overrides $OBSERVO_API_KEY)
+  --base-url string   Observo API base URL (overrides $OBSERVO_BASE_URL)
+  --json              emit machine-readable JSON instead of human text
+  --verbose           log HTTP requests/responses to stderr
 
 ENV:
-  OBSERVO_API_KEY   Account-scoped API key (required for v0.2.0 subcommands)
-  OBSERVO_BASE_URL  API base URL (default: https://api.observoai.co)
+  OBSERVO_API_KEY   Account-scoped API key (required for any HTTP subcommand).
+                    Create one at https://app.observoai.co/settings/api-keys.
+  OBSERVO_BASE_URL  API base URL (default: https://api.observoai.co).
+                    Override for self-hosted / staging.
 ```
 
 ## Development
