@@ -33,16 +33,23 @@ while [[ $# -gt 0 ]]; do
 done
 
 # ---------------------------------------------------------------------
-# Detect OS + arch (GoReleaser archive naming)
+# Detect OS + arch (GoReleaser archive naming).
+#
+# Names MUST be the lowercase Go-native form (linux/amd64), NOT
+# capitalised (Linux/x86_64) — .goreleaser.yaml's name_template is
+# `{{.ProjectName}}_{{.Version}}_{{.Os}}_{{.Arch}}` with default
+# Os/Arch tokens. Capitalised names silently 404'd every install for
+# v0.1.0–v0.6.0 (issue #9). Verified against actual asset names:
+#   gh release view <tag> --json assets
 # ---------------------------------------------------------------------
 case "$(uname -s)" in
-  Darwin) OS="Darwin" ;;
-  Linux)  OS="Linux"  ;;
+  Darwin) OS="darwin" ;;
+  Linux)  OS="linux"  ;;
   *)      echo "unsupported OS: $(uname -s). Use https://github.com/observo-ai/observo-cli/releases manually." >&2; exit 1 ;;
 esac
 
 case "$(uname -m)" in
-  x86_64|amd64) ARCH="x86_64" ;;
+  x86_64|amd64) ARCH="amd64" ;;
   arm64|aarch64) ARCH="arm64" ;;
   *) echo "unsupported arch: $(uname -m)" >&2; exit 1 ;;
 esac

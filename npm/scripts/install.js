@@ -27,15 +27,21 @@ const BIN_DIR = path.join(__dirname, '..', 'bin');
 const BIN_PATH = path.join(BIN_DIR, BINARY_NAME);
 
 // Platform → GoReleaser archive name mapping. Must match the
-// `name_template` in .goreleaser.yaml: observo_<version>_<os>_<arch>.<ext>
+// `name_template` in .goreleaser.yaml:
+//   observo_<version>_<os>_<arch>.<ext>
+// where Os/Arch are GoReleaser defaults — lowercase Go names
+// (linux/amd64), NOT capitalised (Linux/x86_64). Capitalised
+// versions silently 404'd on every install for v0.1.0–v0.6.0
+// (issue #9). Verified against actual asset names with
+//   gh release view v0.6.0 --json assets
 function archiveName() {
   const platformMap = {
-    darwin: 'Darwin',
-    linux: 'Linux',
-    win32: 'Windows',
+    darwin: 'darwin',
+    linux: 'linux',
+    win32: 'windows',
   };
   const archMap = {
-    x64: 'x86_64',
+    x64: 'amd64',
     arm64: 'arm64',
   };
   const goos = platformMap[process.platform];
