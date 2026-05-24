@@ -27,13 +27,14 @@ func IsValidCaseStatus(s string) bool {
 }
 
 // BatchAddCases attaches one or more test cases (by short code) to a
-// run. Idempotent on the server side — calling twice is a no-op for
-// already-attached cases, which lets the CLI safely call it before
-// every PATCH without bookkeeping.
+// run.
 //
-// We send even single-case attaches through batch_add so there's one
-// code path covering both "first PATCH on this case" and "first PATCH
-// on this run for this short code".
+// NOT used by EnsureAndUpdateRunCase anymore — the server's
+// /cases:batch_add rejects short codes (UUID-only) and uses JWT-only
+// auth, so the CLI's account-scoped API-key path always fails on it.
+// Kept public for callers that already have UUIDs and JWT auth, and
+// for future use once OB-340 (server-side: accept short codes + API
+// key, mirror of OB-247 pattern) ships.
 func (c *Client) BatchAddCases(ctx context.Context, runID string, shortCodes []string) error {
 	if runID == "" {
 		return errors.New("BatchAddCases: run_id required")
