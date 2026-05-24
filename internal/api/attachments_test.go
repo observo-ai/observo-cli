@@ -2,10 +2,9 @@ package api
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"io"
-	"mime"
-	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -15,7 +14,7 @@ import (
 	"time"
 )
 
-func TestUploadAttachment_PostsMultipartWithFileAndScope(t *testing.T) {
+func TestUploadAttachment_PostsJSONWithBase64Content(t *testing.T) {
 	// Test fixture file.
 	dir := t.TempDir()
 	file := filepath.Join(dir, "sample.lcov")
@@ -23,38 +22,13 @@ func TestUploadAttachment_PostsMultipartWithFileAndScope(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	var gotMethod, gotPath, gotContentType string
-	var gotRunID string
-	var gotFileBody string
-	var gotFileName string
-
+	var gotMethod, gotPath, gotCT, gotBody string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotMethod = r.Method
 		gotPath = r.URL.Path
-		gotContentType = r.Header.Get("Content-Type")
-
-		// Parse the multipart body to verify shape.
-		_, params, _ := mime.ParseMediaType(r.Header.Get("Content-Type"))
-		mr := multipart.NewReader(r.Body, params["boundary"])
-		for {
-			p, err := mr.NextPart()
-			if err == io.EOF {
-				break
-			}
-			if err != nil {
-				t.Fatalf("multipart: %v", err)
-			}
-			switch p.FormName() {
-			case "run_id":
-				b, _ := io.ReadAll(p)
-				gotRunID = string(b)
-			case "file":
-				gotFileName = p.FileName()
-				b, _ := io.ReadAll(p)
-				gotFileBody = string(b)
-			}
-		}
-
+		gotCT = r.Header.Get("Content-Type")
+		b, _ := io.ReadAll(r.Body)
+		gotBody = string(b)
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"attachment": Attachment{ID: "att-uuid", FileName: "sample.lcov"},
@@ -79,17 +53,24 @@ func TestUploadAttachment_PostsMultipartWithFileAndScope(t *testing.T) {
 	if gotPath != "/api/projects/OB/attachments:upload" {
 		t.Errorf("path: %s", gotPath)
 	}
-	if !strings.HasPrefix(gotContentType, "multipart/form-data; boundary=") {
-		t.Errorf("content-type: %s", gotContentType)
+	if gotCT != "application/json" {
+		t.Errorf("content-type: got %q, want application/json (server gateway has no multipart marshaler)", gotCT)
 	}
-	if gotRunID != "r1" {
-		t.Errorf("run_id field: %q", gotRunID)
+
+	// Decode body and verify shape + base64 round-trips.
+	var body uploadBody
+	if err := json.Unmarshal([]byte(gotBody), &body); err != nil {
+		t.Fatalf("body is not JSON: %v\n%s", err, gotBody)
 	}
-	if gotFileName != "sample.lcov" {
-		t.Errorf("filename: %q", gotFileName)
+	if body.ProjectID != "OB" || body.RunID != "r1" || body.FileName != "sample.lcov" {
+		t.Errorf("body metadata: %+v", body)
 	}
-	if !strings.Contains(gotFileBody, "SF:foo.go") {
-		t.Errorf("file body: %q", gotFileBody)
+	decoded, err := base64.StdEncoding.DecodeString(body.Content)
+	if err != nil {
+		t.Fatalf("content must decode as base64: %v", err)
+	}
+	if string(decoded) != "TN:\nSF:foo.go\nDA:1,1\n" {
+		t.Errorf("decoded content mismatch: %q", decoded)
 	}
 }
 
@@ -125,5 +106,21 @@ func TestUploadAttachment_PropagatesHTTPError(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "file too big") {
 		t.Errorf("error should propagate body: %v", err)
+	}
+}
+
+func TestDetectContentType(t *testing.T) {
+	for _, tc := range []struct {
+		name, want string
+	}{
+		{"x.lcov", "text/plain; charset=utf-8"},
+		{"junit.xml", "application/xml"},
+		{"report.html", "text/html; charset=utf-8"},
+		{"x.json", "application/json"},
+		{"summary.md", "text/plain; charset=utf-8"},
+	} {
+		if got := detectContentType(tc.name, []byte("...")); got != tc.want {
+			t.Errorf("detectContentType(%s): got %q want %q", tc.name, got, tc.want)
+		}
 	}
 }

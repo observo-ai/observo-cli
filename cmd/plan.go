@@ -93,7 +93,10 @@ func planResolveExec(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
-	plan, err := client.GetPlan(context.Background(), prProject, prPlan)
+	// GetPlanByKey handles both UUID and plan_key inputs — UUIDs go
+	// straight through, keys list+filter (the server-side GET requires
+	// UUID only per OB-257; revisit if/when that changes).
+	plan, err := client.GetPlanByKey(context.Background(), prProject, prPlan)
 	if err != nil {
 		return fmt.Errorf("resolve plan: %w", err)
 	}

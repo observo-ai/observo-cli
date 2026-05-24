@@ -16,6 +16,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const https = require('node:https');
 const os = require('node:os');
+const crypto = require('node:crypto');
 const { execSync } = require('node:child_process');
 const zlib = require('node:zlib');
 
@@ -51,6 +52,21 @@ function archiveName() {
 
 function downloadURL() {
   return `https://github.com/observo-ai/observo-cli/releases/download/v${VERSION}/${archiveName()}`;
+}
+
+function checksumsURL() {
+  return `https://github.com/observo-ai/observo-cli/releases/download/v${VERSION}/checksums.txt`;
+}
+
+// Parse GoReleaser's checksums.txt format ("<hex>  <filename>\n" per line)
+// to find the SHA-256 for the given archive name. Throws if not found.
+function parseChecksum(checksumsText, archive) {
+  const lines = checksumsText.split('\n');
+  for (const ln of lines) {
+    const m = ln.match(/^([0-9a-fA-F]{64})\s+(\S+)\s*$/);
+    if (m && m[2] === archive) return m[1].toLowerCase();
+  }
+  throw new Error(`checksums.txt has no entry for ${archive}`);
 }
 
 function followRedirects(url, depth = 0) {
@@ -105,6 +121,26 @@ async function main() {
   process.stdout.write(`observo: downloading ${url}\n`);
 
   const buf = await followRedirects(url);
+
+  // Supply-chain verification: fetch checksums.txt and verify the
+  // archive bytes hash matches. Without this, a tampered release
+  // asset or proxy MITM installs arbitrary code under the user's npm
+  // prefix. checksums.txt itself is fetched from the same GH release,
+  // so this catches per-asset substitution (not a wholesale release
+  // takeover — for that we'd need separate signing).
+  const cksumURL = checksumsURL();
+  process.stdout.write(`observo: verifying SHA-256 against ${cksumURL}\n`);
+  const cksumBuf = await followRedirects(cksumURL);
+  const expected = parseChecksum(cksumBuf.toString('utf8'), archiveName());
+  const actual = crypto.createHash('sha256').update(buf).digest('hex');
+  if (actual !== expected) {
+    throw new Error(
+      `SHA-256 mismatch for ${archiveName()}\n` +
+      `  expected: ${expected}\n` +
+      `  actual:   ${actual}\n` +
+      `  aborting install — do NOT use the downloaded file.`
+    );
+  }
 
   if (url.endsWith('.zip')) {
     extractZip(buf, BIN_DIR);

@@ -118,7 +118,37 @@ func TestRunFinish_ExplicitStatusOverridesStateAuto(t *testing.T) {
 	}
 }
 
-func TestRunFinish_NoStateFileWithAutoDefaultsToPassed(t *testing.T) {
+func TestRunFinish_NoStateFileWithAutoErrors(t *testing.T) {
+	// Post-fix: --status=auto with missing state must NOT silently
+	// default to passed (was a "lost state file → green pipeline" trap).
+	// Operators wanting the old behaviour pass --allow-missing-state.
+	resetRunCreateFlags()
+	resetRunFinishFlags()
+	resetRootFlags()
+
+	missingPath := filepath.Join(t.TempDir(), "missing.json")
+	var buf bytes.Buffer
+	rootCmd.SetOut(&buf)
+	rootCmd.SetErr(&buf)
+	rootCmd.SetArgs([]string{
+		"--api-key", "k",
+		"--base-url", "https://example",
+		"run", "finish",
+		"--project", "OB",
+		"--run-id", "r1",
+		"--state-file", missingPath,
+		// status default = auto, no --allow-missing-state
+	})
+	err := rootCmd.Execute()
+	if err == nil {
+		t.Fatal("expected error when --status=auto and state file missing")
+	}
+	if !strings.Contains(err.Error(), "--allow-missing-state") {
+		t.Errorf("error should mention the opt-out flag; got: %v", err)
+	}
+}
+
+func TestRunFinish_NoStateFileWithAllowMissingStateDefaultsToPassed(t *testing.T) {
 	resetRunCreateFlags()
 	resetRunFinishFlags()
 	resetRootFlags()
@@ -142,13 +172,13 @@ func TestRunFinish_NoStateFileWithAutoDefaultsToPassed(t *testing.T) {
 		"--project", "OB",
 		"--run-id", "r1",
 		"--state-file", missingPath,
-		// status default = auto
+		"--allow-missing-state",
 	})
 	if err := rootCmd.Execute(); err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
 	if !strings.Contains(gotBody, `"status":"passed"`) {
-		t.Errorf("auto with no state should default to passed: %s", gotBody)
+		t.Errorf("--allow-missing-state with auto should default to passed: %s", gotBody)
 	}
 }
 

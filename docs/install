@@ -78,12 +78,34 @@ fi
 # ---------------------------------------------------------------------
 ARCHIVE="observo_${VERSION_NO_V}_${OS}_${ARCH}.tar.gz"
 URL="https://github.com/$REPO/releases/download/${VERSION}/${ARCHIVE}"
+CHECKSUMS_URL="https://github.com/$REPO/releases/download/${VERSION}/checksums.txt"
 
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 
 echo "observo: downloading $URL"
 curl -fsSL -o "$TMP/$ARCHIVE" "$URL"
+
+# Supply-chain verification: GoReleaser publishes checksums.txt
+# alongside every release. Without this check, a GH-proxy MITM,
+# tampered release asset, or stale CDN cache would silently install
+# arbitrary bytes as the user's `observo` binary.
+echo "observo: verifying SHA-256 against $CHECKSUMS_URL"
+curl -fsSL -o "$TMP/checksums.txt" "$CHECKSUMS_URL"
+EXPECTED=$(grep " ${ARCHIVE}$" "$TMP/checksums.txt" | awk '{print $1}')
+if [[ -z "$EXPECTED" ]]; then
+  echo "observo: checksums.txt has no entry for ${ARCHIVE}; aborting" >&2
+  exit 1
+fi
+# shasum -a 256 is preinstalled on macOS + Linux; sha256sum is Linux-only.
+ACTUAL=$( (shasum -a 256 "$TMP/$ARCHIVE" 2>/dev/null || sha256sum "$TMP/$ARCHIVE") | awk '{print $1}')
+if [[ "$ACTUAL" != "$EXPECTED" ]]; then
+  echo "observo: SHA-256 mismatch for $ARCHIVE" >&2
+  echo "  expected: $EXPECTED" >&2
+  echo "  actual:   $ACTUAL" >&2
+  echo "  aborting install — do NOT use the downloaded file." >&2
+  exit 1
+fi
 
 tar -xzf "$TMP/$ARCHIVE" -C "$TMP" observo
 chmod +x "$TMP/observo"

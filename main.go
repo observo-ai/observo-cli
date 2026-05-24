@@ -22,8 +22,8 @@ var (
 )
 
 func main() {
-	cmd.Version = version
-	cmd.Commit = commit
-	cmd.Date = date
+	// SetBuildInfo updates the package vars AND rootCmd.Version so cobra's
+	// --version flag prints the ldflags-injected value, not the "dev" stub.
+	cmd.SetBuildInfo(version, commit, date)
 	os.Exit(cmd.Execute())
 }

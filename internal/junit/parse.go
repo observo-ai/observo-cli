@@ -45,11 +45,20 @@ func (a Aggregates) Outcome() string {
 
 // Parse reads junit XML from r and returns aggregates across ALL testcases.
 // Tolerates either <testsuites> root or a bare <testsuite> root.
-// Empty input is an error (caller should not pretend an empty layer is OK).
+//
+// Empty <testsuite tests="0"/> (no <testcase> children) is treated as a
+// successful zero-test run, NOT an error. Vitest emits this when all
+// tests in a file are .skip()'d; gotestsum emits it when a -run regex
+// matches nothing. Pre-fix this failed the entire CI step ("no
+// <testcase> elements found") on legitimate empty runs. Now returns
+// Aggregates{} and lets the caller (state file recorder) treat the
+// layer as a no-op.
+//
+// We still error on structurally invalid XML — that's a real problem
+// the operator needs to know about.
 func Parse(r io.Reader) (*Aggregates, error) {
 	dec := xml.NewDecoder(r)
 	agg := &Aggregates{}
-	var seenAny bool
 
 	for {
 		tok, err := dec.Token()
@@ -66,7 +75,6 @@ func Parse(r io.Reader) (*Aggregates, error) {
 
 		switch start.Name.Local {
 		case "testcase":
-			seenAny = true
 			tc, err := decodeTestcase(dec, start)
 			if err != nil {
 				return nil, err
@@ -84,9 +92,6 @@ func Parse(r io.Reader) (*Aggregates, error) {
 		}
 	}
 
-	if !seenAny {
-		return nil, errors.New("junit parse: no <testcase> elements found")
-	}
 	return agg, nil
 }
 

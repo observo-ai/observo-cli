@@ -23,10 +23,30 @@ var versionCmd = &cobra.Command{
 
 func init() {
 	rootCmd.AddCommand(versionCmd)
-	// Also wire --version on the root cmd so `observo --version` works
-	// without a subcommand (idiomatic for CLIs; matches the v0.1.0 stub).
+	// Cobra only registers the `--version` flag when rootCmd.Version is
+	// non-empty. Seed it from the package var (defaults to "dev") so the
+	// flag exists from program start. main.go's SetBuildInfo() overwrites
+	// rootCmd.Version with the ldflags value before Execute() runs, so
+	// release builds print the real version, not "dev".
 	rootCmd.Version = Version
 	rootCmd.SetVersionTemplate("{{.Version}}\n")
+}
+
+// SetBuildInfo updates the build-info package vars + propagates Version
+// onto rootCmd so cobra's --version flag prints the right value. main.go
+// must call this BEFORE Execute(); test code may also use it to assert
+// release-build behaviour deterministically.
+//
+// Pre-fix: rootCmd.Version was assigned in init() from the package var
+// Version="dev". main.go's later `cmd.Version = ldflagsVersion` updated
+// the package var but NOT rootCmd.Version — so brew/npm release builds
+// printed "dev" on `observo --version`. The `observo version`
+// subcommand was fine because it read the package var at run time.
+func SetBuildInfo(version, commit, date string) {
+	Version = version
+	Commit = commit
+	Date = date
+	rootCmd.Version = version
 }
 
 // writeVersion emits the multi-line build-info block. Factored out so the

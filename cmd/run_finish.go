@@ -14,10 +14,11 @@ import (
 )
 
 var (
-	rfProject   string
-	rfRunID     string
-	rfStatus    string
-	rfStateFile string
+	rfProject           string
+	rfRunID             string
+	rfStatus            string
+	rfStateFile         string
+	rfAllowMissingState bool
 )
 
 var runFinishCmd = &cobra.Command{
@@ -47,6 +48,8 @@ func init() {
 	f.StringVar(&rfRunID, "run-id", "", "run UUID (default: from state file)")
 	f.StringVar(&rfStatus, "status", "auto", "auto | passed | failed | aborted | skipped")
 	f.StringVar(&rfStateFile, "state-file", state.DefaultPath, "where to read run_id from")
+	f.BoolVar(&rfAllowMissingState, "allow-missing-state", false,
+		"with --status=auto and no state file, default to 'passed' instead of erroring (default false: missing state is an error so a lost-state-file CI pipeline doesn't silently report green)")
 }
 
 func runFinishExec(cmd *cobra.Command, _ []string) error {
@@ -75,10 +78,20 @@ func runFinishExec(cmd *cobra.Command, _ []string) error {
 	}
 	if status == "auto" {
 		if errors.Is(stErr, state.ErrNotFound) {
-			// No state file → no layer outcomes recorded → degenerate but
-			// still meaningful: treat as passed (caller asked for auto but
-			// didn't accumulate evidence; defaulting to failed would be
-			// surprising for a successful no-op pipeline).
+			// Pre-fix this silently defaulted to "passed". That meant a
+			// CI workflow whose state file got dropped between jobs
+			// (artifact upload skipped on cancel, wrong working dir,
+			// custom --state-file path forgotten) reported green for a
+			// pipeline whose layers actually failed — the worst possible
+			// failure mode for a status-push CLI.
+			//
+			// New default: missing state with --status=auto is an
+			// error. Operators with a legitimate no-op pipeline (no
+			// layers reported at all) can pass --allow-missing-state to
+			// opt back in to the "passed" default.
+			if !rfAllowMissingState {
+				return fmt.Errorf("--status=auto requires a state file, none found at %s (run 'observo run create' first, or pass --status explicitly, or pass --allow-missing-state to default to 'passed')", rfStateFile)
+			}
 			status = "passed"
 		} else if stErr != nil {
 			return fmt.Errorf("read state for auto status: %w", stErr)

@@ -62,16 +62,33 @@ func (c *Client) UpdateRunCase(ctx context.Context, runID, shortCode, status str
 	return c.DoJSON(ctx, "PATCH", path, body, nil)
 }
 
-// EnsureAndUpdateRunCase is the idempotent helper subcommands should
-// call. It runs batch_add first (no-op when the case is already
-// attached) then PATCHes status. Two round-trips per call — acceptable
-// for v0.5.0; the optimization (skip batch_add when we know the case
-// is attached) needs server-side guarantees we don't have today.
+// EnsureAndUpdateRunCase PATCHes a run-case status by short code.
+//
+// Previously this also called BatchAddCases first as a safety net for
+// the "case not yet attached" path. That was removed: the server's
+// batch_add RPC requires UUIDs (val.ValidateUuid on each test_case_ids
+// entry) AND uses JWT-only authorizedUser auth, so a CLI passing short
+// codes via an account-scoped API key always got 400 InvalidArgument.
+// Worse, the failure stopped the PATCH from running for the much-more-
+// common already-attached path.
+//
+// Current behavior: just PATCH. If the case is not yet attached, the
+// server returns 404 NotFound and we surface a hint pointing at the
+// known limitation.
+//
+// Server-side fix planned in a follow-up Jira (analogous to OB-274 for
+// case operations): migrate BatchAddTestCasesToRun to `authorize`
+// (API-key path) + accept short codes. Until that lands, callers must
+// pre-attach cases via the dashboard, MCP, or a run create with a plan
+// that includes them.
 func (c *Client) EnsureAndUpdateRunCase(ctx context.Context, runID, shortCode, status string) error {
-	if err := c.BatchAddCases(ctx, runID, []string{shortCode}); err != nil {
-		return fmt.Errorf("ensure case %s on run: %w", shortCode, err)
+	err := c.UpdateRunCase(ctx, runID, shortCode, status)
+	var herr *HTTPError
+	if errors.As(err, &herr) && herr.StatusCode == 404 {
+		return fmt.Errorf("case %s not attached to run %s — pre-attach via dashboard/MCP/plan first (CLI batch_add deferred until server-side fix): %w",
+			shortCode, runID, err)
 	}
-	return c.UpdateRunCase(ctx, runID, shortCode, status)
+	return err
 }
 
 // UpdateRunCaseStepRequest mirrors the server's per-step PATCH body.
