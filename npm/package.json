@@ -1,0 +1,38 @@
+{
+  "name": "@observo-ai/cli",
+  "version": "0.0.0-placeholder",
+  "description": "CLI for pushing CI test runs, coverage, and live test status to Observo",
+  "homepage": "https://github.com/observo-ai/observo-cli",
+  "bugs": {
+    "url": "https://github.com/observo-ai/observo-cli/issues"
+  },
+  "license": "Apache-2.0",
+  "author": "Observo",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/observo-ai/observo-cli.git"
+  },
+  "bin": {
+    "observo": "./bin/observo"
+  },
+  "scripts": {
+    "postinstall": "node scripts/install.js"
+  },
+  "files": [
+    "bin/",
+    "scripts/",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "keywords": [
+    "observo",
+    "ci",
+    "test-pipeline",
+    "coverage",
+    "junit",
+    "lcov",
+    "playwright"
+  ]
+}

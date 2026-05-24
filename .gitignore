@@ -1,0 +1,26 @@
+# Build output
+/observo
+/observo.exe
+/dist/
+
+# Goreleaser snapshots
+*.tar.gz
+*.zip
+checksums.txt
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# Local env / secrets — never commit
+.env
+.env.local
+
+# npm wrapper build artifacts
+/npm/bin/
+/npm/node_modules/
+
+# OS noise
+.DS_Store
+Thumbs.db

@@ -1,0 +1,162 @@
+# GoReleaser config — produces every distribution channel from a single
+# tag push. Channels: GitHub Release binaries, Homebrew tap formula,
+# multi-arch Docker image on GHCR, npm wrapper publish.
+#
+# To cut a release:
+#   git tag v0.X.Y && git push origin v0.X.Y
+# The release.yml workflow takes it from there.
+#
+# Docs: https://goreleaser.com/
+
+version: 2
+
+project_name: observo
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: observo
+    main: ./
+    binary: observo
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    # Skip windows/arm64 — niche, GoReleaser will warn if we leave it on
+    # but the brew formula has it which is fine.
+    ldflags:
+      - -s -w
+      - -X main.version={{.Version}}
+      - -X main.commit={{.Commit}}
+      - -X main.date={{.Date}}
+
+archives:
+  - id: observo
+    name_template: >-
+      {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+    formats: [tar.gz]
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+    files:
+      - LICENSE
+      - README.md
+
+checksum:
+  name_template: 'checksums.txt'
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-next"
+
+changelog:
+  sort: asc
+  use: github
+  filters:
+    exclude:
+      - '^docs:'
+      - '^test:'
+      - '^chore:'
+      - '^ci:'
+      - Merge pull request
+      - Merge branch
+
+# -----------------------------------------------------------------------
+# Homebrew tap formula — auto-pushed to observo-ai/homebrew-tap
+# -----------------------------------------------------------------------
+brews:
+  - name: observo
+    repository:
+      owner: observo-ai
+      name: homebrew-tap
+      token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
+    directory: Formula
+    homepage: "https://github.com/observo-ai/observo-cli"
+    description: "CLI for pushing CI test runs, coverage, and live status to Observo"
+    license: "Apache-2.0"
+    commit_author:
+      name: observo-ai-bot
+      email: noreply@observoai.co
+    test: |
+      system "#{bin}/observo --version"
+    install: |
+      bin.install "observo"
+
+# -----------------------------------------------------------------------
+# Multi-arch Docker images on GHCR (free for public repos)
+# -----------------------------------------------------------------------
+dockers:
+  - image_templates:
+      - "ghcr.io/observo-ai/observo-cli:{{ .Version }}-amd64"
+      - "ghcr.io/observo-ai/observo-cli:latest-amd64"
+    dockerfile: Dockerfile
+    use: buildx
+    goos: linux
+    goarch: amd64
+    build_flag_templates:
+      - "--platform=linux/amd64"
+      - "--label=org.opencontainers.image.source=https://github.com/observo-ai/observo-cli"
+      - "--label=org.opencontainers.image.version={{ .Version }}"
+      - "--label=org.opencontainers.image.licenses=Apache-2.0"
+  - image_templates:
+      - "ghcr.io/observo-ai/observo-cli:{{ .Version }}-arm64"
+      - "ghcr.io/observo-ai/observo-cli:latest-arm64"
+    dockerfile: Dockerfile
+    use: buildx
+    goos: linux
+    goarch: arm64
+    build_flag_templates:
+      - "--platform=linux/arm64"
+      - "--label=org.opencontainers.image.source=https://github.com/observo-ai/observo-cli"
+      - "--label=org.opencontainers.image.version={{ .Version }}"
+      - "--label=org.opencontainers.image.licenses=Apache-2.0"
+
+docker_manifests:
+  - name_template: "ghcr.io/observo-ai/observo-cli:{{ .Version }}"
+    image_templates:
+      - "ghcr.io/observo-ai/observo-cli:{{ .Version }}-amd64"
+      - "ghcr.io/observo-ai/observo-cli:{{ .Version }}-arm64"
+  - name_template: "ghcr.io/observo-ai/observo-cli:latest"
+    image_templates:
+      - "ghcr.io/observo-ai/observo-cli:latest-amd64"
+      - "ghcr.io/observo-ai/observo-cli:latest-arm64"
+
+# -----------------------------------------------------------------------
+# npm package publish via custom hook — see release.yml `npm-publish` job
+# -----------------------------------------------------------------------
+# (GoReleaser has no native npm publisher; we run `npm publish` from the
+# release workflow after GoReleaser uploads the binaries.)
+
+release:
+  github:
+    owner: observo-ai
+    name: observo-cli
+  prerelease: auto
+  draft: false
+  name_template: "v{{.Version}}"
+  header: |
+    ## observo CLI {{.Tag}}
+
+    Install:
+    ```bash
+    # macOS / Linux
+    brew install observo-ai/tap/observo
+
+    # npm
+    npm install -g @observo-ai/cli
+
+    # Docker
+    docker run --rm ghcr.io/observo-ai/observo-cli:{{.Version}} --version
+
+    # curl
+    curl -fsSL https://cli.observoai.co/install | bash
+
+    # go install
+    go install github.com/observo-ai/observo-cli@{{.Tag}}
+    ```
