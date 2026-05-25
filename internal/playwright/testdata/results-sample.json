@@ -1,0 +1,98 @@
+{
+  "config": {
+    "rootDir": "/work/e2e"
+  },
+  "suites": [
+    {
+      "title": "registration.spec.ts",
+      "file": "tests/smoke/registration.spec.ts",
+      "suites": [
+        {
+          "title": "Registration",
+          "file": "tests/smoke/registration.spec.ts",
+          "specs": [
+            {
+              "title": "signup → Mailpit verify-email link",
+              "ok": true,
+              "tags": ["@prod-safe", "@observo:OB-1"],
+              "file": "tests/smoke/registration.spec.ts",
+              "line": 14,
+              "tests": [
+                {
+                  "projectName": "chromium",
+                  "status": "expected",
+                  "results": [
+                    {
+                      "workerIndex": 0,
+                      "status": "passed",
+                      "duration": 4200,
+                      "retry": 0,
+                      "startTime": "2026-05-26T12:00:00.000Z",
+                      "errors": [],
+                      "attachments": [],
+                      "steps": [
+                        { "title": "Open /register", "category": "test.step", "duration": 200 },
+                        { "title": "Submit registration", "category": "test.step", "duration": 800 },
+                        { "title": "expect.toBeVisible", "category": "expect", "duration": 50 }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "title": "login.spec.ts",
+      "file": "tests/smoke/login.spec.ts",
+      "suites": [
+        {
+          "title": "Login",
+          "file": "tests/smoke/login.spec.ts",
+          "specs": [
+            {
+              "title": "OB-7 redirect after submit",
+              "ok": false,
+              "tags": ["@prod-safe"],
+              "file": "tests/smoke/login.spec.ts",
+              "line": 22,
+              "tests": [
+                {
+                  "projectName": "chromium",
+                  "status": "unexpected",
+                  "results": [
+                    {
+                      "workerIndex": 0,
+                      "status": "failed",
+                      "duration": 7500,
+                      "retry": 0,
+                      "startTime": "2026-05-26T12:00:05.000Z",
+                      "errors": [
+                        {
+                          "message": "Element not visible after 5000ms\n\n  expect(locator).toBeVisible()",
+                          "stack": "Error: Element not visible\n    at /work/e2e/tests/smoke/login.spec.ts:24:5",
+                          "location": { "file": "tests/smoke/login.spec.ts", "line": 24, "column": 5 }
+                        }
+                      ],
+                      "attachments": [
+                        { "name": "video", "path": "/work/e2e/test-results/login-OB-7-chromium/video.webm", "contentType": "video/webm" },
+                        { "name": "trace", "path": "/work/e2e/test-results/login-OB-7-chromium/trace.zip", "contentType": "application/zip" },
+                        { "name": "screenshot", "path": "/work/e2e/test-results/login-OB-7-chromium/test-failed-1.png", "contentType": "image/png" }
+                      ],
+                      "steps": [
+                        { "title": "Open /login", "category": "test.step", "duration": 1500 },
+                        { "title": "Fill form and submit", "category": "test.step", "duration": 5000, "error": { "message": "Element not visible" } }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
