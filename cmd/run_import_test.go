@@ -33,6 +33,140 @@ func writeEmptyTraceZipTo(w io.Writer) error {
 	return zw.Close()
 }
 
+// Regression for review R4: when a parent `describe()` carries an OB-N
+// code AND the inner `test()` carries a different OB-N code (very real
+// pattern — e.g. `describe("OB-3 Auth", () => test("OB-7 login flow",
+// ...))` where OB-3 is the feature/epic and OB-7 is the specific case),
+// the inner test's code MUST win. Pre-fix the orchestrator built
+// `titles := [parents..., spec.Title]` and ResolveShortCode took the
+// first match → outer OB-3 captured a status PATCH + all attachments
+// that authors meant for OB-7. Silent, no warning.
+func TestRunImport_E2E_NestedDescribeDoesNotOverrideSpecTitle(t *testing.T) {
+	resetRunImportFlags()
+	resetRootFlags()
+
+	ms := &mockServer{}
+	srv := httptest.NewServer(ms.handler(t, nil))
+	defer srv.Close()
+
+	// Hand-crafted results.json mirroring the pattern from the review:
+	// outer suite `OB-3 Auth`, inner spec `OB-7 login flow`. Final
+	// result is "failed" so the orchestrator would also try to upload
+	// attachments — those must scope to OB-7, not OB-3.
+	resultsJSON := `{
+		"config": {"rootDir": ""},
+		"suites": [{
+			"title": "auth.spec.ts",
+			"file": "tests/auth.spec.ts",
+			"suites": [{
+				"title": "OB-3 Auth",
+				"file": "tests/auth.spec.ts",
+				"specs": [{
+					"title": "OB-7 login flow",
+					"ok": false,
+					"tags": [],
+					"tests": [{
+						"projectName": "chromium",
+						"status": "unexpected",
+						"results": [{
+							"status": "failed", "duration": 1, "retry": 0,
+							"errors": [{"message": "boom"}]
+						}]
+					}]
+				}]
+			}]
+		}]
+	}`
+	dir := t.TempDir()
+	resultsPath := filepath.Join(dir, "results.json")
+	_ = os.WriteFile(resultsPath, []byte(resultsJSON), 0o644)
+
+	var buf bytes.Buffer
+	rootCmd.SetOut(&buf)
+	rootCmd.SetErr(&buf)
+	rootCmd.SetArgs([]string{
+		"--api-key", "k",
+		"--base-url", srv.URL,
+		"run", "import",
+		"--from", "playwright",
+		"--run", "RUN-42",
+		"--project", "proj-uuid",
+		"--results-json", resultsPath,
+		dir,
+	})
+	if err := rootCmd.Execute(); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+
+	// Every PATCH must target OB-7. Any call referencing OB-3 means the
+	// outer describe captured a test it shouldn't have.
+	for _, c := range ms.Calls() {
+		if strings.Contains(c.Path, "/cases/OB-3") {
+			t.Errorf("BUG REGRESSED: outer describe OB-3 captured the inner OB-7 test — call: %s %s", c.Method, c.Path)
+		}
+	}
+	// Sanity: at least one PATCH targeted OB-7.
+	var foundOB7 bool
+	for _, c := range ms.Calls() {
+		if strings.Contains(c.Path, "/cases/OB-7") {
+			foundOB7 = true
+			break
+		}
+	}
+	if !foundOB7 {
+		t.Errorf("expected at least one PATCH/upload targeting OB-7; calls: %v", ms.Calls())
+	}
+}
+
+// Sanity that the fix does NOT regress the parent-only-has-code case:
+// a `describe("OB-99 Auth", () => test("login flow", ...))` (no code in
+// the test title) must still resolve to OB-99 — title fallback still
+// scans the parent chain, just after the spec title.
+func TestRunImport_E2E_ParentOnlyCodeStillResolves(t *testing.T) {
+	resetRunImportFlags()
+	resetRootFlags()
+
+	ms := &mockServer{}
+	srv := httptest.NewServer(ms.handler(t, nil))
+	defer srv.Close()
+
+	resultsJSON := `{
+		"config": {"rootDir": ""},
+		"suites": [{
+			"title": "OB-99 Auth",
+			"specs": [{
+				"title": "login flow",
+				"ok": true,
+				"tags": [],
+				"tests": [{"projectName":"chromium","status":"expected","results":[{"status":"passed","duration":1,"retry":0}]}]
+			}]
+		}]
+	}`
+	dir := t.TempDir()
+	resultsPath := filepath.Join(dir, "results.json")
+	_ = os.WriteFile(resultsPath, []byte(resultsJSON), 0o644)
+
+	var buf bytes.Buffer
+	rootCmd.SetOut(&buf)
+	rootCmd.SetErr(&buf)
+	rootCmd.SetArgs([]string{
+		"--api-key", "k",
+		"--base-url", srv.URL,
+		"run", "import",
+		"--from", "playwright",
+		"--run", "RUN-42",
+		"--project", "proj-uuid",
+		"--results-json", resultsPath,
+		dir,
+	})
+	if err := rootCmd.Execute(); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if !findCall(ms.Calls(), "PATCH", "/api/runs/RUN-42/cases/OB-99") {
+		t.Errorf("parent-only OB-99 must still resolve via title fallback; calls: %v", ms.Calls())
+	}
+}
+
 // Regression for R3 #1: when a test attaches a Playwright `trace.zip`
 // (name="trace") AND any other `.zip` (e.g. test-data archive), the
 // named-trace must win — pre-fix the simple `||` loop overwrote

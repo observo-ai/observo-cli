@@ -218,7 +218,15 @@ func runImportExec(cmd *cobra.Command, args []string) error {
 				}
 			}
 		}
-		code := playwright.ResolveShortCode(spec.Tags, titles, attachmentPaths)
+		// titles is searched in order by ResolveShortCode (first match
+		// wins). spec.Title MUST come before parent describe titles so
+		// a nested `describe("OB-3 Auth", () => { test("OB-7 ...") })`
+		// resolves to OB-7 (the inner test) and not OB-3 (the outer
+		// suite). Previously parents came first, which silently routed
+		// the case PATCH + every attachment to the wrong Observo case
+		// when authors tagged both levels.
+		titlesInnerFirst := append([]string{spec.Title}, titles[:len(titles)-1]...)
+		code := playwright.ResolveShortCode(spec.Tags, titlesInnerFirst, attachmentPaths)
 		if code == "" {
 			summary.SkippedNoCode++
 			fmt.Fprintf(stderr, "skip: no OB-N short code resolved for %q\n",
