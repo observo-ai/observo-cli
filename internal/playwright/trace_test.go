@@ -122,6 +122,103 @@ func TestExtractTrace_EmptyZipReturnsEmptyResult(t *testing.T) {
 	}
 }
 
+// Regression for review finding #1: a trace.trace scan error must NOT
+// abort ExtractTrace before trace.network is read. Pre-fix the function
+// did `return out, err` on the first stream's error and silently dropped
+// the second stream's data on the floor — even though the comment said
+// "keep going on the other stream".
+//
+// We trigger a scan error by writing a single trace.trace line longer
+// than the scanner's max buffer (4MB in trace.go). Network stream stays
+// valid; the extracted network entries must come through.
+func TestExtractTrace_TraceErrorDoesNotDropNetwork(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "trace.zip")
+
+	// Build a zip manually: one oversized trace.trace line + one
+	// valid trace.network entry.
+	fh, err := os.Create(path)
+	if err != nil {
+		t.Fatalf("create zip: %v", err)
+	}
+	w := zip.NewWriter(fh)
+
+	traceFile, err := w.Create("trace.trace")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 5MB single line — scanner buffer cap is 4MB.
+	huge := strings.Repeat("a", 5*1024*1024)
+	if _, err := traceFile.Write([]byte(huge + "\n")); err != nil {
+		t.Fatal(err)
+	}
+
+	netFile, err := w.Create("trace.network")
+	if err != nil {
+		t.Fatal(err)
+	}
+	netLine := `{"time":1500,"duration":120,"request":{"method":"POST","url":"https://api.example.com/login"},"response":{"status":200,"content":{"text":"{\"ok\":true}"}}}`
+	if _, err := netFile.Write([]byte(netLine + "\n")); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := fh.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	redact, _ := NewRedactor("")
+	out, err := ExtractTrace(path, redact)
+	// Error is expected (the trace.trace scan failed) but it must be
+	// non-nil joined error, not a hard return — and out.Network must
+	// reflect the successfully-read network stream.
+	if err == nil {
+		t.Errorf("expected an error from oversized trace.trace line")
+	}
+	if len(out.Network) != 1 {
+		t.Errorf("network data dropped despite trace.trace error: got %d entries (want 1)", len(out.Network))
+	}
+	if len(out.Network) >= 1 && out.Network[0].URL != "https://api.example.com/login" {
+		t.Errorf("network entry shape lost: got %+v", out.Network[0])
+	}
+}
+
+// Regression for review finding #2: previously the recogniser said
+// `method != "console" && class != "BrowserContext"` — `&&` not `||` —
+// which admitted ANY BrowserContext event (navigate, route, …) into
+// the console-message extraction loop. Most of those got filtered later
+// by the empty-message check, but a non-console BrowserContext event
+// that carried a `params.text` field (which newer PW versions do for
+// some lifecycle events) would be mis-classified as a console log.
+func TestExtractTrace_NonConsoleBrowserContextEventFiltered(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "trace.zip")
+	buildTraceZip(t, path,
+		[]string{
+			// Legit console event — must show up.
+			`{"class":"BrowserContext","method":"console","time":1,"params":{"type":"log","text":"hello"}}`,
+			// Non-console BrowserContext event WITH a text payload —
+			// pre-fix this leaked into Console because the old guard
+			// admitted any BrowserContext event regardless of method.
+			`{"class":"BrowserContext","method":"navigate","time":2,"params":{"text":"navigated to /foo"}}`,
+		},
+		nil,
+	)
+
+	redact, _ := NewRedactor("")
+	out, err := ExtractTrace(path, redact)
+	if err != nil {
+		t.Fatalf("ExtractTrace: %v", err)
+	}
+	if len(out.Console) != 1 {
+		t.Errorf("expected only the console event; got %d entries: %+v", len(out.Console), out.Console)
+	}
+	if len(out.Console) >= 1 && out.Console[0].Message != "hello" {
+		t.Errorf("wrong message admitted: %+v", out.Console[0])
+	}
+}
+
 func TestMarshalConsoleNetwork_NilSafe(t *testing.T) {
 	// Nil slices must marshal as `[]` not `null` — the FE viewer expects
 	// arrays. Encoding empty arrays explicitly guards against that.

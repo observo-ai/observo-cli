@@ -4,6 +4,7 @@ import (
 	"archive/zip"
 	"bufio"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 )
@@ -66,25 +67,30 @@ func ExtractTrace(zipPath string, redact *Redactor) (ExtractedTrace, error) {
 	}
 	defer r.Close()
 
+	// Collect per-stream errors instead of returning on the first one —
+	// `trace.trace` typically appears before `trace.network` in the zip,
+	// so a `return` here would silently drop ALL network data on a
+	// recoverable trace-stream scan error. Keep going; surface the
+	// (possibly nil) combined error so the caller can log+continue per
+	// the OB-347 "uploads are non-fatal" contract.
+	var streamErrs []error
 	for _, f := range r.File {
 		switch f.Name {
 		case "trace.trace":
 			entries, err := readConsoleEntries(f)
 			if err != nil {
-				// Non-fatal: surface as warning, keep going on the
-				// other stream so a partial extraction still uploads.
-				return out, fmt.Errorf("read trace.trace: %w", err)
+				streamErrs = append(streamErrs, fmt.Errorf("read trace.trace: %w", err))
 			}
 			out.Console = entries
 		case "trace.network":
 			entries, err := readNetworkEntries(f, redact)
 			if err != nil {
-				return out, fmt.Errorf("read trace.network: %w", err)
+				streamErrs = append(streamErrs, fmt.Errorf("read trace.network: %w", err))
 			}
 			out.Network = entries
 		}
 	}
-	return out, nil
+	return out, errors.Join(streamErrs...)
 }
 
 // readConsoleEntries scans the trace.trace JSONL stream for events that
@@ -122,8 +128,16 @@ func readConsoleEntries(f *zip.File) ([]ConsoleEntry, error) {
 		if err := json.Unmarshal(line, &raw); err != nil {
 			continue // tolerate corrupted lines
 		}
+		// Console events carry method == "console" on both
+		// BrowserContext and Page classes (PW emits them from either
+		// depending on version). Filter on method only — the previous
+		// `method != "console" && class != "BrowserContext"` form
+		// admitted ALL BrowserContext events (navigate, route, …),
+		// which only worked because most lacked params.text and got
+		// filtered later; a navigate event with a text payload in
+		// newer PW versions would be mis-classified as a console log.
 		method, _ := raw["method"].(string)
-		if method != "console" && raw["class"] != "BrowserContext" {
+		if method != "console" {
 			continue
 		}
 		params, _ := raw["params"].(map[string]any)

@@ -2,7 +2,9 @@ package cmd
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -12,6 +14,8 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/observo-ai/observo-cli/internal/api"
+	"github.com/observo-ai/observo-cli/internal/playwright"
 	"github.com/observo-ai/observo-cli/internal/state"
 )
 
@@ -254,6 +258,104 @@ func TestRunImport_E2E_RejectsUnknownSource(t *testing.T) {
 	if err := rootCmd.Execute(); err == nil {
 		t.Fatal("expected error for --from cypress (only playwright supported)")
 	}
+}
+
+// Regression for review finding #3: pre-fix `uploadExtractedJSON`
+// renamed its CreateTemp file to a FIXED basename (`console.json` etc.)
+// inside `os.TempDir()` — two concurrent imports racing on
+// `/tmp/console.json` would have the second Rename atomically overwrite
+// the first's file, and the first process would then upload the second
+// process's data.
+//
+// The fix moves to a per-invocation `os.MkdirTemp("", "observo-import-")`
+// so each call's file path is unique. This test calls uploadExtractedJSON
+// 8× in parallel with distinct payloads and asserts the server received
+// 8 distinct bodies matching their expected content — proving the race
+// no longer mixes uploads.
+func TestUploadExtractedJSON_ConcurrentInvocationsKeepContentIntegrity(t *testing.T) {
+	const concurrency = 8
+	type received struct {
+		Body any `json:"-"`
+	}
+	var (
+		mu       sync.Mutex
+		uploads  []string // captured base64-decoded content of each upload
+	)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var parsed map[string]any
+		if err := json.Unmarshal(body, &parsed); err == nil {
+			if content, ok := parsed["content"].(string); ok {
+				// Server expects base64 — see attachments.go upload contract.
+				// We compare raw base64 here, not decoded, since equality on
+				// the wire is what matters for collision detection.
+				mu.Lock()
+				uploads = append(uploads, content)
+				mu.Unlock()
+			}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"attachment": map[string]any{"id": "att-x", "file_name": "console.json"},
+		})
+	}))
+	defer srv.Close()
+
+	client, err := newTestAPIClient(srv.URL)
+	if err != nil {
+		t.Fatalf("api client: %v", err)
+	}
+
+	var wg sync.WaitGroup
+	wg.Add(concurrency)
+	for i := 0; i < concurrency; i++ {
+		i := i
+		go func() {
+			defer wg.Done()
+			// Each goroutine sends a payload that is uniquely identifiable
+			// post-upload — pre-fix, collisions would cause two payloads
+			// to share content under one of the racing identities.
+			payload := []playwright.ConsoleEntry{
+				{Timestamp: float64(i), Level: "log", Message: fmt.Sprintf("payload-%d", i)},
+			}
+			var dummy importSummary
+			if err := uploadExtractedJSON(
+				context.Background(), client, io.Discard,
+				"proj-uuid", "RUN-42", "OB-1",
+				"console.json", payload, false, &dummy,
+			); err != nil {
+				t.Errorf("goroutine %d: %v", i, err)
+			}
+		}()
+	}
+	wg.Wait()
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(uploads) != concurrency {
+		t.Fatalf("expected %d uploads, got %d", concurrency, len(uploads))
+	}
+	// Distinct content per upload — if the race still existed, at least
+	// two uploads would share base64 content (the surviving file after
+	// rename).
+	seen := make(map[string]struct{}, concurrency)
+	for i, u := range uploads {
+		if _, dup := seen[u]; dup {
+			t.Errorf("duplicate upload content #%d — race re-introduced", i)
+		}
+		seen[u] = struct{}{}
+	}
+}
+
+// newTestAPIClient is a thin convenience over api.New that injects a
+// dummy API key + the test server URL. Kept here (not in the api
+// package) because it's only meaningful in cmd-level integration tests.
+func newTestAPIClient(baseURL string) (*api.Client, error) {
+	return api.New(api.Options{
+		BaseURL:   baseURL,
+		APIKey:    "test-key",
+		UserAgent: "observo-cli-test",
+	})
 }
 
 func TestRunImport_E2E_SkipsCaseWithoutShortCode(t *testing.T) {

@@ -392,33 +392,34 @@ func uploadExtractedJSON(
 		return nil
 	}
 
-	tmp, err := os.CreateTemp("", "observo-"+fileName)
+	// Server keys attachments off the filename suffix for content-type
+	// inference and the dashboard download UX, so the file we point
+	// UploadAttachment at must have the meaningful basename (e.g.
+	// "console.json", not "observo-console.json3829473").
+	//
+	// We get there via a per-invocation temp DIRECTORY rather than a
+	// per-invocation temp FILE renamed to a fixed name at os.TempDir()
+	// root — the rename-to-fixed-name approach races when two `run
+	// import` processes (e.g. parallel sharded CI runners on one
+	// machine) hit the same /tmp/console.json target. The second
+	// Rename atomically overwrites the first process's file, and the
+	// first process then uploads the second process's data.
+	tmpDir, err := os.MkdirTemp("", "observo-import-")
 	if err != nil {
 		return err
 	}
-	defer os.Remove(tmp.Name())
-	if _, err := tmp.Write(data); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
+	defer os.RemoveAll(tmpDir)
 
-	// Server keys attachments off the filename suffix for content-type
-	// inference and dashboard download UX. Rename the temp file so the
-	// uploaded one carries the meaningful basename.
-	renamed := filepath.Join(filepath.Dir(tmp.Name()), fileName)
-	if err := os.Rename(tmp.Name(), renamed); err != nil {
+	path := filepath.Join(tmpDir, fileName)
+	if err := os.WriteFile(path, data, 0o600); err != nil {
 		return err
 	}
-	defer os.Remove(renamed)
 
 	_, uperr := client.UploadAttachment(ctx, api.UploadAttachmentRequest{
 		ProjectID: projectID,
 		RunID:     runID,
 		RunCaseID: code,
-		FilePath:  renamed,
+		FilePath:  path,
 	})
 	if uperr != nil {
 		fmt.Fprintf(stderr, "%s: upload %s: %v\n", code, fileName, uperr)
