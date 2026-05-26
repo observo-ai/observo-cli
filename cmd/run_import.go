@@ -3,6 +3,7 @@ package cmd
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -139,13 +140,20 @@ func runImportExec(cmd *cobra.Command, args []string) error {
 	if !riDryRun && (projectID == "" || runID == "") {
 		pid, rid, sErr := resolveProjectAndRun(projectID, runID, riStateFile)
 		if sErr != nil {
-			// The shared helper's error text references `--run-id`,
-			// which is what `run attach` / `run case set` use. This
-			// command uses `--run` — replace (not %w-wrap) the error
-			// so users aren't told to pass a flag this subcommand
-			// doesn't declare. We don't expose this error via
-			// errors.Is anywhere, so dropping the chain is fine.
-			return fmt.Errorf("missing --project or --run (and no state file from a prior `observo run create`)")
+			// Split the two failure modes:
+			//   1. State file genuinely missing → user simply hasn't
+			//      run `observo run create` yet. Clean help message;
+			//      explicitly avoid the shared helper's "--run-id"
+			//      text (this subcommand declares --run, not --run-id).
+			//   2. State file exists but is corrupt / unparseable →
+			//      the real fix is to repair or delete it, NOT to
+			//      run `observo run create` again. Surface the
+			//      underlying error so the user knows why state
+			//      loading failed.
+			if errors.Is(sErr, state.ErrNotFound) {
+				return fmt.Errorf("missing --project or --run (and no state file from a prior `observo run create`)")
+			}
+			return fmt.Errorf("loading state file %s: %w", riStateFile, sErr)
 		}
 		projectID, runID = pid, rid
 	}
@@ -247,12 +255,18 @@ func runImportExec(cmd *cobra.Command, args []string) error {
 				strings.Join(titles, " » "))
 			return
 		}
-		summary.ResolvedCases++
 
 		if final == nil {
+			// Spec resolved a code but Playwright wrote zero results
+			// (e.g. test.skip() at the suite level). No work to do
+			// here — and ResolvedCases must NOT increment, since it
+			// would inflate the count above steps_patched /
+			// attachments_ok and break CI assertions like
+			// "resolved == steps + attachments".
 			fmt.Fprintf(stderr, "%s: spec has no results (skipped test) — leaving case status untouched\n", code)
 			return
 		}
+		summary.ResolvedCases++
 		status := playwright.MapStatus(final.Status)
 
 		// PATCH case status first so subsequent attachment uploads can
@@ -304,10 +318,15 @@ func runImportExec(cmd *cobra.Command, args []string) error {
 			}
 		}
 
-		// Attachments: skip passing cases unless --upload-passed.
-		// `flaky` (passed-on-retry) is still passed for our purposes —
-		// the user opted into uploading passed attachments explicitly.
-		if status == "passed" && !riUploadPass {
+		// Attachments: skip passing AND skipped cases unless
+		// --upload-passed. The gate exists to keep storage bounded on
+		// a green run — passing tests rarely produce useful debug
+		// payloads, and skipped tests with `test.info().attach()`
+		// before the skip() call would otherwise upload silently
+		// despite the test never running. failed / blocked still
+		// upload unconditionally — that's the debug signal users
+		// actually need.
+		if (status == "passed" || status == "skipped") && !riUploadPass {
 			return
 		}
 
@@ -450,13 +469,17 @@ func statusSeverity(s string) int {
 }
 
 // pickTraceZip finds the Playwright trace.zip among a test's attachments.
-// Two-pass selection: a named "trace" attachment always wins over any
-// other .zip in the list. The fallback to .zip extension is for legacy
-// configs where the attachment name was lost during file copy; it must
-// NEVER override an explicitly named trace, because the test may have
-// attached an unrelated `archive.zip` (custom test data, screenshots
-// bundle, …) that would extract to empty console/network and the real
-// trace would be silently ignored.
+// Two-pass selection: a named "trace" attachment with a .zip suffix
+// always wins over any other .zip in the list. Both conditions matter:
+//
+//   - name=="trace" alone is not enough — users do
+//     `test.info().attach('trace', { path: 'log.txt' })` for custom
+//     debug payloads, and accepting a non-zip path would have
+//     zip.OpenReader fail and the real trace.zip would be silently
+//     lost as the .zip fallback is then never reached.
+//   - .zip extension alone is not enough — a test that attaches a
+//     `data.zip` archive would shadow the real Playwright trace if
+//     ordered later in the slice.
 //
 // Within each pass we take the LAST match — matches Playwright's "show
 // me the final attempt" convention when retries produce multiple traces.
@@ -466,11 +489,12 @@ func pickTraceZip(atts []playwright.PWAttachment) string {
 		if a.Path == "" {
 			continue
 		}
-		if strings.EqualFold(a.Name, "trace") {
+		isZipPath := strings.HasSuffix(strings.ToLower(a.Path), ".zip")
+		if strings.EqualFold(a.Name, "trace") && isZipPath {
 			named = a.Path
 			continue
 		}
-		if strings.HasSuffix(strings.ToLower(a.Path), ".zip") {
+		if isZipPath {
 			anyZip = a.Path
 		}
 	}

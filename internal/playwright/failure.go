@@ -135,7 +135,13 @@ func readSourceExcerpt(root, file string, line int) string {
 		return ""
 	}
 	rel, err := filepath.Rel(realRoot, realPath)
-	if err != nil || strings.HasPrefix(rel, "..") {
+	if err != nil || rel == "." || strings.HasPrefix(rel, "..") {
+		// rel == "." means location.File was empty (or pointed at the
+		// root itself): filepath.Join(root, "") == root, then Rel
+		// returns ".". Without this branch the guard would let
+		// os.Open hit the directory and the EISDIR path returns ""
+		// anyway — but failing fast here keeps the intent obvious
+		// and avoids relying on OS-specific open-on-dir semantics.
 		return ""
 	}
 	path = realPath

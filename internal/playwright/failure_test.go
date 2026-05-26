@@ -131,6 +131,30 @@ func TestExtractFailure_EmptyRootReturnsEmpty(t *testing.T) {
 	}
 }
 
+// Regression for R7 #7 (LOW): an empty location.File (or one that
+// points at the root itself) makes filepath.Rel return "." — that has
+// no ".." prefix so the old guard let it through, then os.Open hit a
+// directory and Read returned EISDIR. Result was empty either way,
+// but failing fast at the guard is more obvious and avoids relying on
+// OS-specific open-on-dir semantics.
+func TestExtractFailure_EmptyFilePathRejectedByGuard(t *testing.T) {
+	root := t.TempDir()
+	in := PWError{
+		Message: "boom",
+		Location: &struct {
+			File   string `json:"file"`
+			Line   int    `json:"line"`
+			Column int    `json:"column"`
+		}{File: "", Line: 1},
+	}
+	f := ExtractFailure(in, root)
+	// Location is preserved (caller still wants to know file=""), but
+	// no excerpt should be produced.
+	if f.SourceExcerpt != "" {
+		t.Errorf("empty location.File must yield empty excerpt; got %q", f.SourceExcerpt)
+	}
+}
+
 func TestExtractFailure_NoLocationNoExcerpt(t *testing.T) {
 	f := ExtractFailure(PWError{Message: "boom"}, t.TempDir())
 	if f.Location != nil || f.SourceExcerpt != "" {

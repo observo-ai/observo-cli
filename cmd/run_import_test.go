@@ -33,6 +33,244 @@ func writeEmptyTraceZipTo(w io.Writer) error {
 	return zw.Close()
 }
 
+// Regression for R7 #1 (HIGH): pickTraceZip must NOT pick a
+// non-.zip attachment that happens to be named "trace". A
+// `test.info().attach('trace', { path: 'log.txt' })` would otherwise
+// shadow the real auto-generated trace.zip → zip.OpenReader fails →
+// trace silently lost.
+func TestPickTraceZip_RequiresZipExtensionOnNamed(t *testing.T) {
+	atts := []playwright.PWAttachment{
+		// Custom non-zip attachment that happens to be named "trace".
+		{Name: "trace", Path: "/tmp/debug-log.txt", ContentType: "text/plain"},
+		// The real Playwright trace.zip, name=trace AND .zip ext.
+		{Name: "trace", Path: "/tmp/trace.zip", ContentType: "application/zip"},
+	}
+	if got := pickTraceZip(atts); got != "/tmp/trace.zip" {
+		t.Errorf("named-trace selector must also require .zip; got %q want /tmp/trace.zip", got)
+	}
+
+	// Reverse the order — non-zip named "trace" must STILL not shadow.
+	rev := []playwright.PWAttachment{atts[1], atts[0]}
+	if got := pickTraceZip(rev); got != "/tmp/trace.zip" {
+		t.Errorf("real trace.zip must win regardless of order; got %q", got)
+	}
+
+	// Only the non-zip named "trace" present → fall through to "" so
+	// the orchestrator doesn't try to ExtractTrace a .txt file.
+	onlyBad := []playwright.PWAttachment{atts[0]}
+	if got := pickTraceZip(onlyBad); got != "" {
+		t.Errorf("non-zip named 'trace' must NOT be picked alone; got %q", got)
+	}
+}
+
+// Regression for R7 #3 (MED): per-case upload body must carry both
+// run_id and run_case_id. Server (rpc_upload_attachment.go:78-79)
+// requires run_id when run_case_id is a short code; dropping run_id
+// to "satisfy" a mutually-exclusive assumption would fail server-side
+// validation. This wire-body test prevents a well-meaning future
+// "cleanup" PR from dropping the field.
+func TestRunImport_E2E_PerCaseUploadCarriesBothRunIDAndRunCaseID(t *testing.T) {
+	resetRunImportFlags()
+	resetRootFlags()
+
+	var perCaseUploadBody map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		if strings.Contains(r.URL.Path, "attachments:upload") {
+			var parsed map[string]any
+			_ = json.Unmarshal(body, &parsed)
+			// Only capture per-case (has run_case_id); skips PATCH calls.
+			if _, ok := parsed["run_case_id"]; ok {
+				perCaseUploadBody = parsed
+			}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"attachment": map[string]any{"id": "att-x"}})
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	att := filepath.Join(dir, "video.webm")
+	_ = os.WriteFile(att, []byte("x"), 0o644)
+	resultsPath := filepath.Join(dir, "results.json")
+	_ = os.WriteFile(resultsPath, mustReadStaged(t, dir, att), 0o644)
+
+	var buf bytes.Buffer
+	rootCmd.SetOut(&buf)
+	rootCmd.SetErr(&buf)
+	rootCmd.SetArgs([]string{
+		"--api-key", "k",
+		"--base-url", srv.URL,
+		"run", "import", "--from", "playwright",
+		"--run", "RUN-42", "--project", "proj-uuid",
+		"--results-json", resultsPath,
+		dir,
+	})
+	if err := rootCmd.Execute(); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+
+	if perCaseUploadBody == nil {
+		t.Fatal("expected at least one per-case upload (the failed OB-7 spec)")
+	}
+	if perCaseUploadBody["run_id"] != "RUN-42" {
+		t.Errorf("per-case upload missing run_id; body=%v", perCaseUploadBody)
+	}
+	if perCaseUploadBody["run_case_id"] != "OB-7" {
+		t.Errorf("per-case upload missing run_case_id; body=%v", perCaseUploadBody)
+	}
+}
+
+// Regression for R7 #4 (MED): a corrupt state file must surface its
+// load error, NOT the generic "no state file" message. Otherwise the
+// user is told to run `observo run create` (creating a new file)
+// when the actual fix is to repair / delete the corrupted one.
+func TestRunImport_E2E_CorruptStateFileErrorSurfaces(t *testing.T) {
+	resetRunImportFlags()
+	resetRootFlags()
+
+	dir := t.TempDir()
+	statePath := filepath.Join(dir, "state.json")
+	if err := os.WriteFile(statePath, []byte("{garbled json not valid"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	resultsPath := filepath.Join(dir, "results.json")
+	_ = os.WriteFile(resultsPath, []byte(`{"config":{}, "suites":[]}`), 0o644)
+
+	var buf bytes.Buffer
+	rootCmd.SetOut(&buf)
+	rootCmd.SetErr(&buf)
+	rootCmd.SetArgs([]string{
+		"--api-key", "k",
+		"--base-url", "https://example",
+		"run", "import", "--from", "playwright",
+		"--results-json", resultsPath,
+		"--state-file", statePath,
+		dir,
+	})
+	err := rootCmd.Execute()
+	if err == nil {
+		t.Fatal("expected error for corrupt state file")
+	}
+	msg := err.Error()
+	// Must mention state file / corruption — NOT the misleading "no
+	// state file from a prior observo run create" hint.
+	if strings.Contains(msg, "no state file from a prior") {
+		t.Errorf("corrupt state file must not produce 'no state file' message; got: %s", msg)
+	}
+	if !strings.Contains(msg, "state file") {
+		t.Errorf("expected the error to reference the state file; got: %s", msg)
+	}
+}
+
+// Regression for R7 #5 (LOW): ResolvedCases counter must not climb on
+// specs with empty tests[] (test.skip at suite level produces this).
+func TestRunImport_E2E_NoResultsSpecDoesNotInflateResolvedCount(t *testing.T) {
+	resetRunImportFlags()
+	resetRootFlags()
+
+	ms := &mockServer{}
+	srv := httptest.NewServer(ms.handler(t, nil))
+	defer srv.Close()
+
+	// Spec carries an OB code but tests[] is empty (no projection
+	// executed). Pre-fix the spec would be counted as resolved.
+	resultsJSON := `{
+		"config": {"rootDir": ""},
+		"suites": [{
+			"title": "s",
+			"specs": [{
+				"title": "OB-1 zero results spec",
+				"ok": true,
+				"tags": [],
+				"tests": []
+			}]
+		}]
+	}`
+	dir := t.TempDir()
+	resultsPath := filepath.Join(dir, "results.json")
+	_ = os.WriteFile(resultsPath, []byte(resultsJSON), 0o644)
+
+	var stdout bytes.Buffer
+	rootCmd.SetOut(&stdout)
+	rootCmd.SetErr(io.Discard)
+	rootCmd.SetArgs([]string{
+		"--api-key", "k", "--base-url", srv.URL, "--json",
+		"run", "import", "--from", "playwright",
+		"--run", "RUN-42", "--project", "proj-uuid",
+		"--results-json", resultsPath, dir,
+	})
+	if err := rootCmd.Execute(); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	var summary map[string]any
+	if err := json.Unmarshal(stdout.Bytes(), &summary); err != nil {
+		t.Fatalf("summary JSON: %v", err)
+	}
+	if got, _ := summary["resolved_cases"].(float64); got != 0 {
+		t.Errorf("resolved_cases should be 0 for empty-results spec, got %v", got)
+	}
+	if got, _ := summary["total_specs"].(float64); got != 1 {
+		t.Errorf("total_specs should still count the spec itself, got %v", got)
+	}
+}
+
+// Regression for R7 #6 (LOW): skipped tests with attachments must
+// honour the --upload-passed gate. Pre-fix only "passed" was gated,
+// so a `test.skip()` placed after `test.info().attach()` quietly
+// uploaded the attachment despite the test never running.
+func TestRunImport_E2E_SkippedAttachmentsHonourUploadPassedGate(t *testing.T) {
+	resetRunImportFlags()
+	resetRootFlags()
+
+	ms := &mockServer{}
+	srv := httptest.NewServer(ms.handler(t, nil))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	att := filepath.Join(dir, "video.webm")
+	_ = os.WriteFile(att, []byte("x"), 0o644)
+	resultsJSON := fmt.Sprintf(`{
+		"config": {"rootDir": ""},
+		"suites": [{
+			"title": "s",
+			"specs": [{
+				"title": "OB-9 skipped with attachment",
+				"ok": true,
+				"tags": [],
+				"tests": [{"projectName":"chromium","status":"skipped","results":[{
+					"status":"skipped","duration":0,"retry":0,
+					"attachments":[{"name":"video","path":%q,"contentType":"video/webm"}]
+				}]}]
+			}]
+		}]
+	}`, att)
+	resultsPath := filepath.Join(dir, "results.json")
+	_ = os.WriteFile(resultsPath, []byte(resultsJSON), 0o644)
+
+	var buf bytes.Buffer
+	rootCmd.SetOut(&buf)
+	rootCmd.SetErr(&buf)
+	rootCmd.SetArgs([]string{
+		"--api-key", "k", "--base-url", srv.URL,
+		"run", "import", "--from", "playwright",
+		"--run", "RUN-42", "--project", "proj-uuid",
+		"--results-json", resultsPath, dir,
+	})
+	if err := rootCmd.Execute(); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+
+	// Status PATCH for OB-9 is expected (we still mark the case
+	// skipped), but the attachment upload must NOT fire without
+	// --upload-passed.
+	for _, c := range ms.Calls() {
+		if c.Method == "POST" && strings.Contains(c.Path, "attachments:upload") {
+			t.Errorf("skipped test attachment must not upload without --upload-passed; got: %v", c)
+		}
+	}
+}
+
 // Regression for R5 #1 (HIGH): secrets that appear ONLY in the
 // failing test's stack trace (axios/got/node-fetch embed full request
 // + headers in thrown errors) must also pass through the redactor.

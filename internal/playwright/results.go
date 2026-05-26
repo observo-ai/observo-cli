@@ -112,10 +112,13 @@ type OutputChunk struct {
 	Text string `json:"text,omitempty"`
 }
 
-// ParseResults reads a Playwright JSON reporter file. The function is
-// strict about the suites[] root — anything else is an error so the
-// CLI can surface "this file isn't a Playwright JSON reporter output"
-// up front instead of silently importing zero tests.
+// ParseResults reads a Playwright JSON reporter file. We reject payloads
+// missing the suites[] key entirely (likely the wrong file — JUnit XML
+// renamed to .json, or a partial run that never wrote the array), but
+// EMPTY `"suites": []` is accepted: that's the legitimate shape when
+// `playwright test --grep <no-matches>` (or any pre-filter) selects
+// zero tests. The orchestrator surfaces total_specs=0 in its summary
+// so CI can gate on it explicitly.
 func ParseResults(r io.Reader) (*Results, error) {
 	var out Results
 	dec := json.NewDecoder(r)
