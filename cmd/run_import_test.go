@@ -440,6 +440,122 @@ func TestRunImport_E2E_ErrorDoesNotLeakRunIDText(t *testing.T) {
 	}
 }
 
+// Regression for the --extract-only flag (CLI v0.7.1). When the flag
+// is set, the orchestrator must:
+//   - NOT call PATCH /api/runs/.../cases/{code}        (status PATCH)
+//   - NOT call PATCH /api/runs/.../cases/.../steps/N   (step PATCH)
+//   - NOT call POST /api/projects/.../attachments:upload for the raw
+//     video/trace/screenshot files
+//   - STILL upload the extracted failure.json (and console.json /
+//     network.json if the trace.zip yields them)
+//
+// Use case: a CI workflow that already runs a live writeback reporter
+// (e.g. e2e/reporters/observo-reporter.ts) handles status + raw
+// artifacts; this command then runs post-mortem only to add the
+// extracted JSONs the reporter doesn't produce. Without --extract-only
+// the dashboard would show duplicate attachment rows and redundant
+// PATCH traffic.
+func TestRunImport_E2E_ExtractOnlySkipsStatusAndRawUploads(t *testing.T) {
+	resetRunImportFlags()
+	resetRootFlags()
+
+	ms := &mockServer{}
+	srv := httptest.NewServer(ms.handler(t, nil))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	att := filepath.Join(dir, "video.webm")
+	_ = os.WriteFile(att, []byte("x"), 0o644)
+	resultsPath := filepath.Join(dir, "results.json")
+	_ = os.WriteFile(resultsPath, mustReadStaged(t, dir, att), 0o644)
+
+	var buf bytes.Buffer
+	rootCmd.SetOut(&buf)
+	rootCmd.SetErr(&buf)
+	rootCmd.SetArgs([]string{
+		"--api-key", "k",
+		"--base-url", srv.URL,
+		"run", "import", "--from", "playwright",
+		"--run", "RUN-42", "--project", "proj-uuid",
+		"--results-json", resultsPath,
+		"--extract-only",
+		dir,
+	})
+	if err := rootCmd.Execute(); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+
+	calls := ms.Calls()
+	for _, c := range calls {
+		if c.Method == "PATCH" {
+			t.Errorf("extract-only must not issue PATCH; got: %s %s", c.Method, c.Path)
+		}
+	}
+	rawNames := map[string]bool{"video.webm": true, "trace.zip": true, "test-failed-1.png": true}
+	for _, c := range calls {
+		if c.Method != "POST" || !strings.Contains(c.Path, "attachments:upload") {
+			continue
+		}
+		if fn, _ := c.Body["file_name"].(string); rawNames[fn] {
+			t.Errorf("extract-only must not upload raw attachment %q; body=%v", fn, c.Body)
+		}
+	}
+	var sawFailureJSON bool
+	for _, c := range calls {
+		if c.Method != "POST" || !strings.Contains(c.Path, "attachments:upload") {
+			continue
+		}
+		if fn, _ := c.Body["file_name"].(string); fn == "failure.json" {
+			sawFailureJSON = true
+			if id, _ := c.Body["run_case_id"].(string); id != "OB-7" {
+				t.Errorf("failure.json must be scoped to OB-7; got run_case_id=%q", id)
+			}
+		}
+	}
+	if !sawFailureJSON {
+		t.Errorf("extract-only must still upload failure.json for failed OB-7; calls=%v", calls)
+	}
+}
+
+// Sanity that --extract-only does NOT regress the default behaviour:
+// without the flag, the case PATCH still fires for both OB-1 and OB-7.
+func TestRunImport_E2E_DefaultStillPATCHesAndUploads(t *testing.T) {
+	resetRunImportFlags()
+	resetRootFlags()
+
+	ms := &mockServer{}
+	srv := httptest.NewServer(ms.handler(t, nil))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	att := filepath.Join(dir, "video.webm")
+	_ = os.WriteFile(att, []byte("x"), 0o644)
+	resultsPath := filepath.Join(dir, "results.json")
+	_ = os.WriteFile(resultsPath, mustReadStaged(t, dir, att), 0o644)
+
+	var buf bytes.Buffer
+	rootCmd.SetOut(&buf)
+	rootCmd.SetErr(&buf)
+	rootCmd.SetArgs([]string{
+		"--api-key", "k",
+		"--base-url", srv.URL,
+		"run", "import", "--from", "playwright",
+		"--run", "RUN-42", "--project", "proj-uuid",
+		"--results-json", resultsPath,
+		dir,
+	})
+	if err := rootCmd.Execute(); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	calls := ms.Calls()
+	if !findCall(calls, "PATCH", "/api/runs/RUN-42/cases/OB-1") {
+		t.Errorf("default mode must PATCH OB-1; calls=%v", calls)
+	}
+	if !findCall(calls, "PATCH", "/api/runs/RUN-42/cases/OB-7") {
+		t.Errorf("default mode must PATCH OB-7; calls=%v", calls)
+	}
+}
+
 // Regression for review R4: when a parent `describe()` carries an OB-N
 // code AND the inner `test()` carries a different OB-N code (very real
 // pattern — e.g. `describe("OB-3 Auth", () => test("OB-7 login flow",
@@ -762,6 +878,7 @@ func resetRunImportFlags() {
 	riRedact = ""
 	riUploadPass = false
 	riDryRun = false
+	riExtractOnly = false
 	riStateFile = state.DefaultPath
 }
 
