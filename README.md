@@ -43,7 +43,7 @@ COMMANDS:
   run create               Create a TestRun from a regression plan
   run finish               Mark a run passed/failed/aborted
   run case set             PATCH a run-case status by short code
-  run case step set        PATCH a single step's status (live e2e reporter)
+  run case step set        Update a single step's status within a run case
   run attach               Upload an artifact (junit, lcov, html, ...) to a run
   run pipeline-layer set   Set aggregate stats + attachment IDs for a CI layer
   run import --from playwright <dir>
@@ -64,28 +64,6 @@ ENV:
                     Create one at https://app.observoai.co/settings/api-keys.
   OBSERVO_BASE_URL  API base URL (default: https://api.observoai.co).
                     Override for self-hosted / staging.
-```
-
-## Development
-
-```bash
-go mod tidy
-go build -o observo .
-./observo --version
-```
-
-Release dry-run (requires [GoReleaser](https://goreleaser.com)):
-
-```bash
-goreleaser release --snapshot --clean --skip=publish
-```
-
-Cutting a release:
-
-```bash
-git tag v0.X.Y
-git push origin v0.X.Y
-# .github/workflows/release.yml takes it from here.
 ```
 
 ## Importing Playwright runs
@@ -112,9 +90,12 @@ export default defineConfig({
 
 ### Usage
 
+Replace `WEB` with your own project code (the short prefix shown in
+your Observo dashboard, e.g. `WEB`, `MYAPP`, `CHECKOUT`):
+
 ```bash
 # 1. Pre-create the run (carries CI metadata: commit, branch, actor, …).
-observo run create --project OB --plan REGRESSION
+observo run create --project WEB --plan REGRESSION
 
 # 2. Run Playwright.
 npx playwright test
@@ -125,18 +106,18 @@ observo run import --from playwright ./test-results --run "$RUN_KEY"
 
 ### Short-code resolution
 
-Each test must map to an Observo case (short code like `OB-7`). The importer
-checks three sources, in order:
+Each Playwright test maps to one Observo case by its short code (e.g.
+`WEB-7`, where `WEB` is your project prefix). The importer looks at three
+sources, in order, and stops at the first match:
 
-1. **Explicit tag** `@observo:OB-7` (recommended — never ambiguous):
+1. **Explicit tag** `@observo:WEB-7` (recommended — unambiguous):
    ```ts
-   test('login redirect', { tag: ['@prod-safe', '@observo:OB-7'] }, async ({ page }) => { … });
+   test('login redirect', { tag: ['@observo:WEB-7'] }, async ({ page }) => { … });
    ```
-2. **OB-N in test or describe title** (e.g. `test('OB-7 redirect after submit', …)`).
-3. **OB-N in the attachment directory name** (fallback for the legacy
-   `web-portal/scripts/upload-playwright-attachments.sh` flow that derived
-   codes from Playwright's auto-generated dir names like
-   `auth-login-OB-7-chromium/`).
+2. **Code in test or describe title** (e.g. `test('WEB-7 redirect after submit', …)`).
+3. **Code in the attachment directory name** (last-resort fallback for
+   suites that don't tag yet — Playwright's auto-generated dir name often
+   carries the code, e.g. `login-WEB-7-chromium/`).
 
 Tests with no resolvable code are skipped with a warning; the import does
 not fail.
@@ -152,8 +133,9 @@ not fail.
 | `network.json`      | Extracted from `trace.zip` (request/response pairs)          |
 | `failure.json`      | Shaped from `result.errors[]` + source excerpt               |
 
-`console.json` and `network.json` are machine-readable so an AI failure-
-analysis layer (separate epic) can consume them without binary parsing.
+`console.json` and `network.json` are machine-readable, so downstream
+tools (dashboards, AI failure-analysis agents) can consume them
+without binary parsing.
 
 Passed cases skip attachment upload by default — pass `--upload-passed` to
 include them.
@@ -176,36 +158,39 @@ Parses the directory and prints the plan (which short codes resolve, which
 attachments would upload) without making API calls. No `OBSERVO_API_KEY`
 required.
 
-### Extract-only mode (companion to a live reporter)
+### Extract-only mode
 
-When your run already has a live writeback reporter handling case + step
-status and raw artifact uploads (e.g. the Observo Playwright reporter in
-your `playwright.config.ts`), use `--extract-only` to add JUST the
-extracted `console.json` / `network.json` / `failure.json` artifacts —
-without re-PATCHing case status or re-uploading the raw video / trace /
-screenshot files.
+When your CI already runs the Observo Playwright reporter to stream live
+status + raw artifacts during the test run, use `--extract-only` to add
+just the extracted `console.json` / `network.json` / `failure.json`
+artifacts afterwards — without re-updating case status or re-uploading
+the video / trace / screenshot files the reporter already pushed.
 
 ```bash
-# Live reporter ran during the Playwright suite; this adds the extracted
-# JSON artifacts post-mortem.
 observo run import --from playwright ./test-results --run RUN-42 --extract-only
 ```
 
-What it skips:
+Skipped in this mode: case status updates, per-step status updates, raw
+artifact uploads.
 
-- `PATCH /api/runs/.../cases/{code}` (case status)
-- `PATCH /api/runs/.../cases/.../steps/N` (step status)
-- `POST /api/projects/.../attachments:upload` for raw `*.webm` / `*.zip` / `*.png`
+Still uploaded: the extracted `console.json`, `network.json` (from
+`trace.zip`), and `failure.json` (from the test's error objects).
 
-What it still does:
+Running the default import alongside the live reporter would create
+duplicate attachments in the dashboard; `--extract-only` is the clean
+composition.
 
-- Parses `results.json`, resolves short codes
-- Extracts `trace.zip` → uploads `console.json` + `network.json` (when present)
-- Builds `failure.json` from `errors[]` and uploads it (failed/blocked cases)
+## Contributing
 
-Without `--extract-only`, running the import alongside a live reporter
-duplicates attachment rows in the dashboard and produces redundant PATCH
-traffic — `--extract-only` is the clean composition pattern.
+Local build:
+
+```bash
+go mod tidy
+go build -o observo .
+./observo --version
+```
+
+Issues and PRs welcome at <https://github.com/observo-ai/observo-cli>.
 
 ## License
 
