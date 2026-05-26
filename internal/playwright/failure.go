@@ -108,10 +108,29 @@ func readSourceExcerpt(root, file string, line int) string {
 	// against a malicious results.json pointing at /etc/shadow on a
 	// shared CI runner. Absolute paths from Playwright are accepted
 	// only when no --source-root was set (root == "") — caller's call.
+	//
+	// Resolve symlinks BEFORE the Rel check: a lexical `filepath.Rel`
+	// happily accepts `<root>/link` where `link → /etc/shadow`, because
+	// the rel string ("link") has no `..` prefix. EvalSymlinks collapses
+	// the link to its real target so the Rel check sees the actual
+	// destination, and the guard rejects symlinks that escape. Missing
+	// files (typical for tests in CI sandboxes where the source isn't
+	// co-located) cause EvalSymlinks to error — fall through to "" via
+	// the os.Open failure, no special-case needed.
 	if root != "" {
-		if rel, err := filepath.Rel(root, path); err != nil || strings.HasPrefix(rel, "..") {
+		realPath, err := filepath.EvalSymlinks(path)
+		if err != nil {
 			return ""
 		}
+		realRoot, err := filepath.EvalSymlinks(root)
+		if err != nil {
+			return ""
+		}
+		rel, err := filepath.Rel(realRoot, realPath)
+		if err != nil || strings.HasPrefix(rel, "..") {
+			return ""
+		}
+		path = realPath
 	}
 	fh, err := os.Open(path)
 	if err != nil {

@@ -113,3 +113,63 @@ func TestExtractFailure_NoLocationNoExcerpt(t *testing.T) {
 		t.Errorf("expected no Location/excerpt, got %+v", f)
 	}
 }
+
+// Regression for review R3 #4: a symlink inside the source root that
+// points OUTSIDE the root must be rejected before the file is read.
+// Pre-fix the path-traversal guard used lexical filepath.Rel only:
+// rel="link" has no `..` prefix → guard passes → os.Open follows the
+// link and reads /etc/passwd contents into the uploaded failure.json.
+// Real attack surface: a malicious PR plants a symlink in the source
+// tree on a shared CI runner.
+func TestExtractFailure_SymlinkToOutsideRootRejected(t *testing.T) {
+	// /etc/passwd exists on every Unix runner and is the canonical
+	// path-traversal proof. Skip on Windows where /etc/passwd doesn't
+	// exist + symlink semantics differ; the guard is unix-relevant.
+	if _, err := os.Stat("/etc/passwd"); err != nil {
+		t.Skip("symlink-to-/etc/passwd test requires Unix-style /etc/passwd")
+	}
+	root := t.TempDir()
+	link := filepath.Join(root, "evil.ts")
+	if err := os.Symlink("/etc/passwd", link); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+
+	in := PWError{
+		Message: "boom",
+		Location: &struct {
+			File   string `json:"file"`
+			Line   int    `json:"line"`
+			Column int    `json:"column"`
+		}{File: "evil.ts", Line: 1},
+	}
+	f := ExtractFailure(in, root)
+	if f.SourceExcerpt != "" {
+		t.Errorf("symlink escape must yield empty source_excerpt; got:\n%s", f.SourceExcerpt)
+	}
+	if strings.Contains(f.SourceExcerpt, "root:") {
+		t.Errorf("/etc/passwd content leaked via symlink:\n%s", f.SourceExcerpt)
+	}
+}
+
+// Sanity: a regular (non-symlink) file inside the source root still
+// works — the symlink hardening must not regress the happy path.
+func TestExtractFailure_RegularFileStillReadsExcerpt(t *testing.T) {
+	root := t.TempDir()
+	src := filepath.Join(root, "real.ts")
+	body := "line 1\nline 2\nline 3 — failure here\nline 4\nline 5\n"
+	if err := os.WriteFile(src, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	in := PWError{
+		Message: "boom",
+		Location: &struct {
+			File   string `json:"file"`
+			Line   int    `json:"line"`
+			Column int    `json:"column"`
+		}{File: "real.ts", Line: 3},
+	}
+	f := ExtractFailure(in, root)
+	if !strings.Contains(f.SourceExcerpt, "line 3 — failure here") {
+		t.Errorf("expected line 3 in excerpt, got:\n%s", f.SourceExcerpt)
+	}
+}

@@ -33,6 +33,122 @@ func writeEmptyTraceZipTo(w io.Writer) error {
 	return zw.Close()
 }
 
+// Regression for R3 #1: when a test attaches a Playwright `trace.zip`
+// (name="trace") AND any other `.zip` (e.g. test-data archive), the
+// named-trace must win — pre-fix the simple `||` loop overwrote
+// `picked` with whichever .zip came later, often the non-trace one,
+// silently extracting empty console/network and uploading nothing.
+func TestPickTraceZip_PrefersNamedTraceOverLaterZip(t *testing.T) {
+	atts := []playwright.PWAttachment{
+		{Name: "trace", Path: "/tmp/trace.zip", ContentType: "application/zip"},
+		{Name: "test-data", Path: "/tmp/archive.zip", ContentType: "application/zip"},
+	}
+	if got := pickTraceZip(atts); got != "/tmp/trace.zip" {
+		t.Errorf("named trace must win over later .zip; got %q want /tmp/trace.zip", got)
+	}
+	// Reverse order — named trace at index 1 must still win.
+	rev := []playwright.PWAttachment{atts[1], atts[0]}
+	if got := pickTraceZip(rev); got != "/tmp/trace.zip" {
+		t.Errorf("named trace must win regardless of order; got %q", got)
+	}
+	// No named trace → fall back to last .zip (legacy compat).
+	noName := []playwright.PWAttachment{
+		{Name: "first", Path: "/tmp/a.zip"},
+		{Name: "second", Path: "/tmp/b.zip"},
+	}
+	if got := pickTraceZip(noName); got != "/tmp/b.zip" {
+		t.Errorf("fallback should pick last .zip when no named trace; got %q", got)
+	}
+}
+
+// Regression for R3 #2: multi-project specs (chromium + webkit) where
+// the FIRST project fails and the LAST project passes must report the
+// failure, not the passing-last result. Pre-fix `pickFinalResult` took
+// the last `spec.Tests[]` entry unconditionally and surfaced "passed"
+// for a spec whose `spec.OK` was already false.
+func TestPickFinalResult_PicksWorstStatusAcrossProjects(t *testing.T) {
+	spec := &playwright.Spec{
+		Tests: []playwright.Test{
+			{
+				ProjectName: "chromium",
+				Status:      "unexpected",
+				Results: []playwright.TestResult{
+					{Status: "failed", Duration: 1000, Retry: 0,
+						Errors: []playwright.PWError{{Message: "chromium boom"}}},
+				},
+			},
+			{
+				ProjectName: "webkit",
+				Status:      "expected",
+				Results: []playwright.TestResult{
+					{Status: "passed", Duration: 500, Retry: 0},
+				},
+			},
+		},
+	}
+	got := pickFinalResult(spec)
+	if got == nil {
+		t.Fatalf("expected the failing chromium result, got nil")
+	}
+	if got.Status != "failed" {
+		t.Errorf("expected worst-status failed, got %q (the passing webkit result leaked through)", got.Status)
+	}
+	if len(got.Errors) == 0 || got.Errors[0].Message != "chromium boom" {
+		t.Errorf("expected chromium's error attached, got %+v", got.Errors)
+	}
+}
+
+// Tie-break sanity: when all projects passed, the later one wins.
+// Preserves the old "last projection" behaviour for the common case.
+func TestPickFinalResult_TieBreakPicksLaterProject(t *testing.T) {
+	spec := &playwright.Spec{
+		Tests: []playwright.Test{
+			{ProjectName: "chromium", Results: []playwright.TestResult{{Status: "passed", Duration: 100}}},
+			{ProjectName: "webkit", Results: []playwright.TestResult{{Status: "passed", Duration: 200}}},
+		},
+	}
+	got := pickFinalResult(spec)
+	if got == nil || got.Duration != 200 {
+		t.Errorf("expected webkit (later) result on a tie, got %+v", got)
+	}
+}
+
+// Regression for R3 #3: `run import` declares --run, not --run-id;
+// when the user omits both --project / --run AND has no state file,
+// the error must mention --run (not the shared helper's --run-id text)
+// or the suggested fix sends them to a flag that doesn't exist on this
+// subcommand.
+func TestRunImport_E2E_ErrorMentionsRunFlagNotRunID(t *testing.T) {
+	resetRunImportFlags()
+	resetRootFlags()
+
+	// No state file, no flags → resolveProjectAndRun fails.
+	dir := t.TempDir()
+	resultsPath := filepath.Join(dir, "results.json")
+	_ = os.WriteFile(resultsPath, []byte(`{"config":{}, "suites":[]}`), 0o644)
+
+	var buf bytes.Buffer
+	rootCmd.SetOut(&buf)
+	rootCmd.SetErr(&buf)
+	rootCmd.SetArgs([]string{
+		"--api-key", "k",
+		"--base-url", "https://example",
+		"run", "import",
+		"--from", "playwright",
+		"--results-json", resultsPath,
+		"--state-file", filepath.Join(dir, "no-such-state.json"),
+		dir,
+	})
+	err := rootCmd.Execute()
+	if err == nil {
+		t.Fatal("expected error when project/run flags + state file all missing")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "--run") {
+		t.Errorf("expected --run flag mentioned in error; got: %s", msg)
+	}
+}
+
 func resetRunImportFlags() {
 	riFrom = "playwright"
 	riProject = ""

@@ -139,7 +139,12 @@ func runImportExec(cmd *cobra.Command, args []string) error {
 	if !riDryRun && (projectID == "" || runID == "") {
 		pid, rid, sErr := resolveProjectAndRun(projectID, runID, riStateFile)
 		if sErr != nil {
-			return sErr
+			// The shared helper's error text references `--run-id`,
+			// which is what `run attach` / `run case set` use. This
+			// command uses `--run` — re-wrap the error so users
+			// aren't told to pass a flag this subcommand doesn't
+			// declare.
+			return fmt.Errorf("missing --project or --run (and no state file from a prior `observo run create`): %w", sErr)
 		}
 		projectID, runID = pid, rid
 	}
@@ -358,35 +363,88 @@ func runImportExec(cmd *cobra.Command, args []string) error {
 	return p.Result(summaryToMap(summary), summaryHuman(summary))
 }
 
-// pickFinalResult returns the last-attempt TestResult across all
-// projects of a spec (Playwright nests projects under spec.tests). We
-// take the LAST test's LAST result — for single-project setups (the
-// common case) that's the only attempt; for multi-project specs the
-// definitive write is the last project's outcome.
+// pickFinalResult selects which test attempt (and therefore which set
+// of attachments + steps + errors) to upload for a spec.
+//
+// Single-project configs — the common case — have spec.Tests with one
+// entry, and this just returns its FinalResult().
+//
+// Multi-project configs (chromium + webkit + firefox …) project the
+// same spec across every project. spec.OK is the AND across them, so a
+// chromium failure paired with a passing webkit must NOT report
+// "passed" just because webkit was iterated last. We pick the result
+// with the worst status across all projects so the dashboard surfaces
+// the failure that needs attention and uploads the failing browser's
+// artifacts. Tie-break: later project wins (preserves the old "last
+// projection" behaviour when statuses match).
 func pickFinalResult(spec *playwright.Spec) *playwright.TestResult {
 	if len(spec.Tests) == 0 {
 		return nil
 	}
-	last := &spec.Tests[len(spec.Tests)-1]
-	return last.FinalResult()
+	var worst *playwright.TestResult
+	worstRank := -1
+	for i := range spec.Tests {
+		r := spec.Tests[i].FinalResult()
+		if r == nil {
+			continue
+		}
+		if rank := statusSeverity(r.Status); rank >= worstRank {
+			worstRank = rank
+			worst = r
+		}
+	}
+	return worst
 }
 
-// pickTraceZip finds the first attachment that looks like a Playwright
-// trace.zip. Naming rule mirrors PW: name="trace" with .zip extension.
-// Multiple traces in a single test are uncommon (only on retry); we
-// extract from the last one to match the FE viewer's "show me the
-// final attempt" default.
+// statusSeverity maps a Playwright TestResult.status to a rank — higher
+// means "deserves more operator attention". Used by pickFinalResult to
+// promote a failing browser over a passing one in multi-project specs.
+func statusSeverity(s string) int {
+	switch s {
+	case "failed":
+		return 4
+	case "timedOut", "interrupted":
+		return 3
+	case "skipped":
+		return 1
+	case "passed":
+		return 0
+	}
+	// Unknown statuses sit above passed but below the explicit failure
+	// classes — defensively flag the test for review without overruling
+	// a real failure.
+	return 2
+}
+
+// pickTraceZip finds the Playwright trace.zip among a test's attachments.
+// Two-pass selection: a named "trace" attachment always wins over any
+// other .zip in the list. The fallback to .zip extension is for legacy
+// configs where the attachment name was lost during file copy; it must
+// NEVER override an explicitly named trace, because the test may have
+// attached an unrelated `archive.zip` (custom test data, screenshots
+// bundle, …) that would extract to empty console/network and the real
+// trace would be silently ignored.
+//
+// Within each pass we take the LAST match — matches Playwright's "show
+// me the final attempt" convention when retries produce multiple traces.
 func pickTraceZip(atts []playwright.PWAttachment) string {
-	var picked string
+	var named, anyZip string
 	for _, a := range atts {
 		if a.Path == "" {
 			continue
 		}
-		if strings.EqualFold(a.Name, "trace") || strings.HasSuffix(strings.ToLower(a.Path), ".zip") {
-			picked = a.Path
+		if strings.EqualFold(a.Name, "trace") {
+			named = a.Path
+			continue
+		}
+		if strings.HasSuffix(strings.ToLower(a.Path), ".zip") {
+			anyZip = a.Path
 		}
 	}
-	return picked
+	if named != "" {
+		return named
+	}
+	return anyZip
 }
 
 // uploadExtractedJSON writes `payload` to a tempfile, then uploads it
