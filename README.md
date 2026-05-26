@@ -27,10 +27,10 @@ observo --version
 The curl installer accepts `--version`:
 
 ```bash
-curl -fsSL https://cli.observoai.co/install | bash -s -- --version v0.1.0
+curl -fsSL https://cli.observoai.co/install | bash -s -- --version v0.7.1
 ```
 
-Other channels follow each tool's native pinning (`brew install observo-ai/tap/observo@0.1.0`, `npm install -g @observo-ai/cli@0.1.0`, `ghcr.io/observo-ai/observo-cli:v0.1.0`).
+Other channels follow each tool's native pinning (`brew install observo-ai/tap/observo@0.7.1`, `npm install -g @observo-ai/cli@0.7.1`, `ghcr.io/observo-ai/observo-cli:v0.7.1`).
 
 ## Usage
 
