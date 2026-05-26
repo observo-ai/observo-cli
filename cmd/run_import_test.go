@@ -1,8 +1,10 @@
 package cmd
 
 import (
+	"archive/zip"
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -18,6 +20,18 @@ import (
 	"github.com/observo-ai/observo-cli/internal/playwright"
 	"github.com/observo-ai/observo-cli/internal/state"
 )
+
+// writeEmptyTraceZipTo creates an empty trace.zip in-place with both
+// JSONL members present but blank. Reused by the empty-extract test.
+func writeEmptyTraceZipTo(w io.Writer) error {
+	zw := zip.NewWriter(w)
+	for _, name := range []string{"trace.trace", "trace.network"} {
+		if _, err := zw.Create(name); err != nil {
+			return err
+		}
+	}
+	return zw.Close()
+}
 
 func resetRunImportFlags() {
 	riFrom = "playwright"
@@ -356,6 +370,231 @@ func newTestAPIClient(baseURL string) (*api.Client, error) {
 		APIKey:    "test-key",
 		UserAgent: "observo-cli-test",
 	})
+}
+
+// Regression for review #2: a trace.zip with neither console events nor
+// network requests must NOT trigger empty-array uploads (`console.json:
+// []`, `network.json: []`). Pre-fix the orchestrator uploaded both
+// unconditionally, inflating AttachmentsOK and creating empty rows the
+// FE viewer would have to special-case.
+func TestRunImport_E2E_EmptyExtractionSkipsUpload(t *testing.T) {
+	resetRunImportFlags()
+	resetRootFlags()
+
+	ms := &mockServer{}
+	srv := httptest.NewServer(ms.handler(t, nil))
+	defer srv.Close()
+
+	// Build a real (empty) trace.zip so the extractor returns
+	// out.Console=[]/out.Network=[] but no error.
+	dir := t.TempDir()
+	tracePath := filepath.Join(dir, "trace.zip")
+	if err := writeEmptyTraceZip(tracePath); err != nil {
+		t.Fatalf("write empty zip: %v", err)
+	}
+
+	// Hand-crafted results.json that points the trace attachment at the
+	// empty zip. One failed spec → so attachments would be uploaded if
+	// extraction yielded any data.
+	resultsJSON := fmt.Sprintf(`{
+		"config": {"rootDir": ""},
+		"suites": [{"title": "s", "specs": [{
+			"title": "OB-99 empty trace",
+			"ok": false,
+			"tests": [{"projectName": "chromium", "status": "unexpected", "results": [{
+				"status": "failed", "duration": 1, "retry": 0,
+				"errors": [],
+				"attachments": [
+					{"name": "trace", "path": %q, "contentType": "application/zip"}
+				]
+			}]}]
+		}]}]
+	}`, tracePath)
+	resultsPath := filepath.Join(dir, "results.json")
+	_ = os.WriteFile(resultsPath, []byte(resultsJSON), 0o644)
+
+	var buf bytes.Buffer
+	rootCmd.SetOut(&buf)
+	rootCmd.SetErr(&buf)
+	rootCmd.SetArgs([]string{
+		"--api-key", "k",
+		"--base-url", srv.URL,
+		"run", "import",
+		"--from", "playwright",
+		"--run", "RUN-42",
+		"--project", "proj-uuid",
+		"--results-json", resultsPath,
+		dir,
+	})
+	if err := rootCmd.Execute(); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+
+	// We expect exactly: 1 PATCH case + 1 attach POST for trace.zip itself.
+	// NO uploads for console.json or network.json (both extracted empty).
+	for _, c := range ms.Calls() {
+		if c.Method == "POST" && strings.Contains(c.Path, ":upload") {
+			fn, _ := c.Body["file_name"].(string)
+			if fn == "console.json" || fn == "network.json" {
+				t.Errorf("empty extraction must not upload %s; got call: %v", fn, c)
+			}
+		}
+	}
+}
+
+// Regression for review #3: with --source-root unset and
+// results.Config.RootDir == "", the orchestrator must fall back to cwd
+// so failure.go's path-traversal guard remains active. An absolute
+// `location.file` outside cwd (e.g. /etc/passwd) must produce an empty
+// source_excerpt rather than embedding the file contents.
+func TestRunImport_E2E_RejectsAbsoluteLocationFileWhenRootEmpty(t *testing.T) {
+	resetRunImportFlags()
+	resetRootFlags()
+
+	ms := &mockServer{}
+	var uploadedFailure string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var parsed map[string]any
+		_ = json.Unmarshal(body, &parsed)
+		ms.mu.Lock()
+		ms.calls = append(ms.calls, mockCall{Method: r.Method, Path: r.URL.Path, Body: parsed})
+		ms.mu.Unlock()
+		if fn, _ := parsed["file_name"].(string); fn == "failure.json" {
+			if content, ok := parsed["content"].(string); ok {
+				// base64-decode is easy here but we keep it simple — assert on
+				// the base64 itself. We just need to confirm /etc/passwd content
+				// isn't leaking.
+				uploadedFailure = content
+			}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"attachment": map[string]any{"id": "att-x"},
+		})
+	}))
+	defer srv.Close()
+
+	// /etc/passwd exists on every Unix runner and is the canonical
+	// path-traversal proof. The orchestrator must NOT embed its
+	// content into failure.json regardless of where cwd is.
+	resultsJSON := `{
+		"config": {"rootDir": ""},
+		"suites": [{"title": "s", "specs": [{
+			"title": "OB-99 traversal",
+			"ok": false,
+			"tests": [{"projectName": "chromium", "status": "unexpected", "results": [{
+				"status": "failed", "duration": 1, "retry": 0,
+				"errors": [{
+					"message": "boom",
+					"location": {"file": "/etc/passwd", "line": 1, "column": 1}
+				}]
+			}]}]
+		}]}]
+	}`
+	dir := t.TempDir()
+	resultsPath := filepath.Join(dir, "results.json")
+	_ = os.WriteFile(resultsPath, []byte(resultsJSON), 0o644)
+
+	var buf bytes.Buffer
+	rootCmd.SetOut(&buf)
+	rootCmd.SetErr(&buf)
+	rootCmd.SetArgs([]string{
+		"--api-key", "k",
+		"--base-url", srv.URL,
+		"run", "import",
+		"--from", "playwright",
+		"--run", "RUN-42",
+		"--project", "proj-uuid",
+		"--results-json", resultsPath,
+		dir,
+	})
+	if err := rootCmd.Execute(); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if uploadedFailure == "" {
+		t.Fatal("expected a failure.json upload to land")
+	}
+	// Decode base64 and verify no /etc/passwd content (`root:`, `nobody:`).
+	// /etc/passwd reliably contains "root:" on the first line of every
+	// Unix runner; that's the canonical marker we'd see leak if the
+	// guard regressed.
+	dec, err := base64.StdEncoding.DecodeString(uploadedFailure)
+	if err != nil {
+		t.Fatalf("base64 decode: %v", err)
+	}
+	if strings.Contains(string(dec), "root:") {
+		t.Errorf("traversal guard regressed — /etc/passwd content leaked into failure.json:\n%s", string(dec))
+	}
+}
+
+// Regression for review #4: when an attachment carries inline `body`
+// (base64) instead of `path`, the upload loop must log a skip warning
+// rather than silently dropping it. Future v1.1 may decode+upload;
+// today the user at least sees the missing attachment.
+func TestRunImport_E2E_InlineBodyAttachmentLogsWarning(t *testing.T) {
+	resetRunImportFlags()
+	resetRootFlags()
+
+	ms := &mockServer{}
+	srv := httptest.NewServer(ms.handler(t, nil))
+	defer srv.Close()
+
+	// Failed spec with one body-only attachment (no path).
+	resultsJSON := `{
+		"config": {"rootDir": ""},
+		"suites": [{"title": "s", "specs": [{
+			"title": "OB-99 inline only",
+			"ok": false,
+			"tests": [{"projectName": "chromium", "status": "unexpected", "results": [{
+				"status": "failed", "duration": 1, "retry": 0,
+				"errors": [],
+				"attachments": [
+					{"name": "custom-blob", "body": "aGVsbG8=", "contentType": "text/plain"}
+				]
+			}]}]
+		}]}]
+	}`
+	dir := t.TempDir()
+	resultsPath := filepath.Join(dir, "results.json")
+	_ = os.WriteFile(resultsPath, []byte(resultsJSON), 0o644)
+
+	var buf bytes.Buffer
+	rootCmd.SetOut(&buf)
+	rootCmd.SetErr(&buf)
+	rootCmd.SetArgs([]string{
+		"--api-key", "k",
+		"--base-url", srv.URL,
+		"run", "import",
+		"--from", "playwright",
+		"--run", "RUN-42",
+		"--project", "proj-uuid",
+		"--results-json", resultsPath,
+		dir,
+	})
+	if err := rootCmd.Execute(); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if !strings.Contains(buf.String(), "skipping inline attachment") {
+		t.Errorf("expected inline-attachment warning in output, got: %s", buf.String())
+	}
+	if !strings.Contains(buf.String(), `"custom-blob"`) {
+		t.Errorf("warning should name the attachment, got: %s", buf.String())
+	}
+}
+
+// writeEmptyTraceZip builds a zip with empty `trace.trace` and
+// `trace.network` members — ExtractTrace returns empty slices with no
+// error. Helper for the empty-extract regression test.
+func writeEmptyTraceZip(path string) error {
+	// Use the same zip-writer pattern as the playwright package tests
+	// but keep it inline here to avoid exporting the helper.
+	fh, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	defer fh.Close()
+	return writeEmptyTraceZipTo(fh)
 }
 
 func TestRunImport_E2E_SkipsCaseWithoutShortCode(t *testing.T) {

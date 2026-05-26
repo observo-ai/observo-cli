@@ -158,8 +158,20 @@ func runImportExec(cmd *cobra.Command, args []string) error {
 	sourceRoot := riSourceRoot
 	if sourceRoot == "" {
 		// Default to the rootDir Playwright recorded in its config.
-		// Falls back to "" when results.json has no rootDir (cwd-relative).
 		sourceRoot = results.Config.RootDir
+	}
+	if sourceRoot == "" {
+		// Last-resort default: current working directory. This makes
+		// failure.go's path-traversal guard always active — without a
+		// non-empty root the guard short-circuits and a hostile
+		// results.json with `location.file: "/etc/shadow"` would leak
+		// up to 7 lines of that file into the uploaded failure.json.
+		// Real risk on CI that processes external-PR test artifacts.
+		// Errors here are tolerated: a Getwd failure leaves the guard
+		// disabled, which is what the previous behaviour already was.
+		if cwd, err := os.Getwd(); err == nil {
+			sourceRoot = cwd
+		}
 	}
 
 	// Build the API client only when not dry-running. Keeps dry-run
@@ -270,6 +282,16 @@ func runImportExec(cmd *cobra.Command, args []string) error {
 		// 1. Direct artifact files (.webm / .zip / .png / etc.)
 		for _, att := range final.Attachments {
 			if att.Path == "" {
+				// Playwright can emit small attachments (custom
+				// test.info().attach() with a buffer payload) as
+				// inline base64 in `body` with no `path`. v1 doesn't
+				// decode+upload these — warn so the user knows a named
+				// attachment was skipped rather than silently lost.
+				if att.Body != "" {
+					fmt.Fprintf(stderr,
+						"%s: skipping inline attachment %q (no file path; v1 only uploads path-backed attachments)\n",
+						code, att.Name)
+				}
 				continue
 			}
 			if !riDryRun {
@@ -290,6 +312,11 @@ func runImportExec(cmd *cobra.Command, args []string) error {
 		}
 
 		// 2. Extracted console.json + network.json from trace.zip (if any).
+		//    Guard with len(...) > 0 so a trace without console events
+		//    or without network requests doesn't upload an empty `[]`
+		//    array — saves a round-trip, keeps AttachmentsOK honest, and
+		//    avoids creating an attachment row the FE viewer would have
+		//    to special-case as "no data" instead of "no attachment".
 		if tracePath := pickTraceZip(final.Attachments); tracePath != "" {
 			tr, err := playwright.ExtractTrace(tracePath, redact)
 			if err != nil {
@@ -297,13 +324,17 @@ func runImportExec(cmd *cobra.Command, args []string) error {
 				fmt.Fprintf(stderr, "%s: extract %s: %v (uploading whatever extracted)\n",
 					code, tracePath, err)
 			}
-			if err := uploadExtractedJSON(ctx, client, stderr, projectID, runID, code,
-				"console.json", tr.Console, riDryRun, &summary); err != nil {
-				summary.AttachmentsErr++
+			if len(tr.Console) > 0 {
+				if err := uploadExtractedJSON(ctx, client, stderr, projectID, runID, code,
+					"console.json", tr.Console, riDryRun, &summary); err != nil {
+					summary.AttachmentsErr++
+				}
 			}
-			if err := uploadExtractedJSON(ctx, client, stderr, projectID, runID, code,
-				"network.json", tr.Network, riDryRun, &summary); err != nil {
-				summary.AttachmentsErr++
+			if len(tr.Network) > 0 {
+				if err := uploadExtractedJSON(ctx, client, stderr, projectID, runID, code,
+					"network.json", tr.Network, riDryRun, &summary); err != nil {
+					summary.AttachmentsErr++
+				}
 			}
 		}
 
