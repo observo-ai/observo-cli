@@ -287,6 +287,69 @@ func TestRunImport_E2E_NestedDescribeDoesNotOverrideSpecTitle(t *testing.T) {
 	}
 }
 
+// Regression for review R6: with nested describes carrying OB codes
+// and the leaf test without one, the INNERMOST describe (most
+// specific) must win. Pre-fix the resolver input prepended spec.Title
+// but left parents in their Playwright outermost-first order, so for
+// `describe("OB-3", () => describe("OB-5", () => test("no-code")))`
+// the outer OB-3 captured a test the author scoped under OB-5.
+func TestRunImport_E2E_InnermostDescribeWinsOverOuter(t *testing.T) {
+	resetRunImportFlags()
+	resetRootFlags()
+
+	ms := &mockServer{}
+	srv := httptest.NewServer(ms.handler(t, nil))
+	defer srv.Close()
+
+	resultsJSON := `{
+		"config": {"rootDir": ""},
+		"suites": [{
+			"title": "auth.spec.ts",
+			"file": "tests/auth.spec.ts",
+			"suites": [{
+				"title": "OB-3 Outer",
+				"file": "tests/auth.spec.ts",
+				"suites": [{
+					"title": "OB-5 Inner",
+					"file": "tests/auth.spec.ts",
+					"specs": [{
+						"title": "no code in this leaf",
+						"ok": true,
+						"tags": [],
+						"tests": [{"projectName":"chromium","status":"expected","results":[{"status":"passed","duration":1,"retry":0}]}]
+					}]
+				}]
+			}]
+		}]
+	}`
+	dir := t.TempDir()
+	resultsPath := filepath.Join(dir, "results.json")
+	_ = os.WriteFile(resultsPath, []byte(resultsJSON), 0o644)
+
+	var buf bytes.Buffer
+	rootCmd.SetOut(&buf)
+	rootCmd.SetErr(&buf)
+	rootCmd.SetArgs([]string{
+		"--api-key", "k",
+		"--base-url", srv.URL,
+		"run", "import", "--from", "playwright",
+		"--run", "RUN-42", "--project", "proj-uuid",
+		"--results-json", resultsPath,
+		dir,
+	})
+	if err := rootCmd.Execute(); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+
+	// Must PATCH OB-5 (innermost), not OB-3 (outer).
+	if findCall(ms.Calls(), "PATCH", "/api/runs/RUN-42/cases/OB-3") {
+		t.Errorf("BUG REGRESSED: outer OB-3 captured a test scoped under OB-5; calls: %v", ms.Calls())
+	}
+	if !findCall(ms.Calls(), "PATCH", "/api/runs/RUN-42/cases/OB-5") {
+		t.Errorf("expected innermost OB-5 to be PATCHed; calls: %v", ms.Calls())
+	}
+}
+
 // Sanity that the fix does NOT regress the parent-only-has-code case:
 // a `describe("OB-99 Auth", () => test("login flow", ...))` (no code in
 // the test title) must still resolve to OB-99 — title fallback still

@@ -220,13 +220,26 @@ func runImportExec(cmd *cobra.Command, args []string) error {
 			}
 		}
 		// titles is searched in order by ResolveShortCode (first match
-		// wins). spec.Title MUST come before parent describe titles so
-		// a nested `describe("OB-3 Auth", () => { test("OB-7 ...") })`
-		// resolves to OB-7 (the inner test) and not OB-3 (the outer
-		// suite). Previously parents came first, which silently routed
-		// the case PATCH + every attachment to the wrong Observo case
-		// when authors tagged both levels.
-		titlesInnerFirst := append([]string{spec.Title}, titles[:len(titles)-1]...)
+		// wins). Build the resolver input innermost-first so the most
+		// specific scope is tried before its ancestors:
+		//
+		//   spec.Title → innermost describe → … → outermost describe
+		//
+		// Playwright passes `parents` outermost-to-innermost via
+		// walkSuite, so we reverse them before prepending spec.Title.
+		// Two failure modes this prevents:
+		//   1. `describe("OB-3 Auth", () => test("OB-7 login", ...))`
+		//      — without spec.Title-first, OB-3 captures the test
+		//      intended for OB-7.
+		//   2. `describe("OB-3", () => describe("OB-5", () =>
+		//      test("no-code")))` — without parents reversed, OB-3
+		//      (outer) wins over OB-5 (inner, more specific).
+		parentChain := titles[:len(titles)-1]
+		titlesInnerFirst := make([]string, 0, len(titles))
+		titlesInnerFirst = append(titlesInnerFirst, spec.Title)
+		for i := len(parentChain) - 1; i >= 0; i-- {
+			titlesInnerFirst = append(titlesInnerFirst, parentChain[i])
+		}
 		code := playwright.ResolveShortCode(spec.Tags, titlesInnerFirst, attachmentPaths)
 		if code == "" {
 			summary.SkippedNoCode++
