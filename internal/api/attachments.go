@@ -18,8 +18,13 @@ type Attachment struct {
 	FileName string `json:"file_name,omitempty"`
 }
 
-// UploadAttachmentRequest carries the source file + the scope it attaches to.
-// Exactly one of RunID / RunCaseID / RunCaseStepID may be set (server validates).
+// UploadAttachmentRequest carries the source file + the scope it
+// attaches to. At least one of RunID / RunCaseID / RunCaseStepID must
+// be set (server: rpc_upload_attachment.go:120-122). They are NOT
+// mutually exclusive: when RunCaseID is a short code like "OB-7", the
+// server requires RunID to be set too so it can resolve the per-case
+// row (rpc_upload_attachment.go:78-79). Set both for per-case uploads;
+// set only RunID for run-level attachments (e.g. results.json).
 type UploadAttachmentRequest struct {
 	ProjectID     string // path scope
 	FilePath      string // local file path (read at upload time)
