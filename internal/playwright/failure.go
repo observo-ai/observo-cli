@@ -100,14 +100,23 @@ func readSourceExcerpt(root, file string, line int) string {
 	if line <= 0 {
 		return ""
 	}
+	// Fail-safe: if the caller couldn't determine a source root (rare —
+	// orchestrator falls back to os.Getwd(), which itself can fail when
+	// the cwd was deleted under a long-running CI runner), refuse to
+	// open ANY path rather than running unguarded. Without root the
+	// traversal check below is skipped, and an absolute path like
+	// `/etc/shadow` in a hostile `results.json` would otherwise reach
+	// `os.Open` unconditionally.
+	if root == "" {
+		return ""
+	}
 	path := file
-	if !filepath.IsAbs(path) && root != "" {
+	if !filepath.IsAbs(path) {
 		path = filepath.Join(root, file)
 	}
 	// Reject paths that escape the source root after Join — defence
 	// against a malicious results.json pointing at /etc/shadow on a
-	// shared CI runner. Absolute paths from Playwright are accepted
-	// only when no --source-root was set (root == "") — caller's call.
+	// shared CI runner.
 	//
 	// Resolve symlinks BEFORE the Rel check: a lexical `filepath.Rel`
 	// happily accepts `<root>/link` where `link → /etc/shadow`, because
@@ -117,21 +126,19 @@ func readSourceExcerpt(root, file string, line int) string {
 	// files (typical for tests in CI sandboxes where the source isn't
 	// co-located) cause EvalSymlinks to error — fall through to "" via
 	// the os.Open failure, no special-case needed.
-	if root != "" {
-		realPath, err := filepath.EvalSymlinks(path)
-		if err != nil {
-			return ""
-		}
-		realRoot, err := filepath.EvalSymlinks(root)
-		if err != nil {
-			return ""
-		}
-		rel, err := filepath.Rel(realRoot, realPath)
-		if err != nil || strings.HasPrefix(rel, "..") {
-			return ""
-		}
-		path = realPath
+	realPath, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return ""
 	}
+	realRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		return ""
+	}
+	rel, err := filepath.Rel(realRoot, realPath)
+	if err != nil || strings.HasPrefix(rel, "..") {
+		return ""
+	}
+	path = realPath
 	fh, err := os.Open(path)
 	if err != nil {
 		return ""

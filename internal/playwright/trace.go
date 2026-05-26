@@ -161,7 +161,12 @@ func readConsoleEntries(f *zip.File) ([]ConsoleEntry, error) {
 		out = append(out, entry)
 	}
 	if err := scanner.Err(); err != nil {
-		return nil, err
+		// Preserve whatever entries were collected before the scanner
+		// blew up — typically an oversized line N+1 shouldn't lose
+		// lines 1..N. Caller (ExtractTrace) joins this error with the
+		// other stream's via errors.Join, so the partial result still
+		// flows through and `len(out) > 0` triggers an upload.
+		return out, err
 	}
 	return out, nil
 }
@@ -212,7 +217,12 @@ func readNetworkEntries(f *zip.File, redact *Redactor) ([]NetworkEntry, error) {
 		out = append(out, entry)
 	}
 	if err := scanner.Err(); err != nil {
-		return nil, err
+		// Preserve whatever entries were collected before the scanner
+		// blew up — typically an oversized line N+1 shouldn't lose
+		// lines 1..N. Caller (ExtractTrace) joins this error with the
+		// other stream's via errors.Join, so the partial result still
+		// flows through and `len(out) > 0` triggers an upload.
+		return out, err
 	}
 	return out, nil
 }

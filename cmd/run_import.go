@@ -141,10 +141,11 @@ func runImportExec(cmd *cobra.Command, args []string) error {
 		if sErr != nil {
 			// The shared helper's error text references `--run-id`,
 			// which is what `run attach` / `run case set` use. This
-			// command uses `--run` — re-wrap the error so users
-			// aren't told to pass a flag this subcommand doesn't
-			// declare.
-			return fmt.Errorf("missing --project or --run (and no state file from a prior `observo run create`): %w", sErr)
+			// command uses `--run` — replace (not %w-wrap) the error
+			// so users aren't told to pass a flag this subcommand
+			// doesn't declare. We don't expose this error via
+			// errors.Is anywhere, so dropping the chain is fine.
+			return fmt.Errorf("missing --project or --run (and no state file from a prior `observo run create`)")
 		}
 		projectID, runID = pid, rid
 	}
@@ -279,10 +280,15 @@ func runImportExec(cmd *cobra.Command, args []string) error {
 					fmt.Fprintf(stderr, "%s step %d: PATCH: %v\n", code, stepIdx, err)
 					continue
 				}
+				// Counter reflects actual successful API calls only; in
+				// dry-run no PATCH was made, so `steps_patched` stays
+				// 0 — important for CI scripts that gate on summary
+				// JSON before promoting a real import. (Same pattern
+				// applies to AttachmentsOK below.)
+				summary.StepsPatched++
 			} else {
 				fmt.Fprintf(stderr, "would PATCH %s step %d status=%s\n", code, stepIdx, stepStatus)
 			}
-			summary.StepsPatched++
 		}
 
 		// Attachments: skip passing cases unless --upload-passed.
@@ -318,10 +324,10 @@ func runImportExec(cmd *cobra.Command, args []string) error {
 					summary.AttachmentsErr++
 					continue
 				}
+				summary.AttachmentsOK++
 			} else {
 				fmt.Fprintf(stderr, "would upload %s for %s\n", att.Path, code)
 			}
-			summary.AttachmentsOK++
 		}
 
 		// 2. Extracted console.json + network.json from trace.zip (if any).
@@ -356,7 +362,13 @@ func runImportExec(cmd *cobra.Command, args []string) error {
 			failures := make([]playwright.Failure, 0, len(final.Errors))
 			for _, e := range final.Errors {
 				f := playwright.ExtractFailure(e, sourceRoot)
+				// Both Message and Stack must run through redact —
+				// HTTP-client libraries (axios / got / node-fetch) embed
+				// the full request, including `Authorization: Bearer …`
+				// headers, in the thrown error's stack frame. Redacting
+				// only Message leaves secrets verbatim in failure.json.
 				f.Message = redact.Apply(f.Message)
+				f.Stack = redact.Apply(f.Stack)
 				failures = append(failures, f)
 			}
 			if err := uploadExtractedJSON(ctx, client, stderr, projectID, runID, code,
@@ -484,8 +496,11 @@ func uploadExtractedJSON(
 	}
 
 	if dryRun {
+		// Counter only reflects actual successful API calls — see
+		// the step-PATCH loop above for rationale. Dry-run summary
+		// will have AttachmentsOK=0 even when "would upload" lines
+		// were printed.
 		fmt.Fprintf(stderr, "would upload extracted %s for %s (%d bytes)\n", fileName, code, len(data))
-		summary.AttachmentsOK++
 		return nil
 	}
 

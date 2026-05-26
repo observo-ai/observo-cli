@@ -33,6 +33,175 @@ func writeEmptyTraceZipTo(w io.Writer) error {
 	return zw.Close()
 }
 
+// Regression for R5 #1 (HIGH): secrets that appear ONLY in the
+// failing test's stack trace (axios/got/node-fetch embed full request
+// + headers in thrown errors) must also pass through the redactor.
+// Pre-fix we redacted Message but not Stack; the uploaded failure.json
+// leaked `Authorization: Bearer …` verbatim.
+func TestRunImport_E2E_StackRedactedNotJustMessage(t *testing.T) {
+	resetRunImportFlags()
+	resetRootFlags()
+
+	var uploadedFailureContent string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var parsed map[string]any
+		_ = json.Unmarshal(body, &parsed)
+		if fn, _ := parsed["file_name"].(string); fn == "failure.json" {
+			if content, ok := parsed["content"].(string); ok {
+				uploadedFailureContent = content
+			}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"attachment": map[string]any{"id": "att-x"}})
+	}))
+	defer srv.Close()
+
+	resultsJSON := `{
+		"config": {"rootDir": ""},
+		"suites": [{
+			"title": "s",
+			"specs": [{
+				"title": "OB-99 leaky test",
+				"ok": false,
+				"tests": [{"projectName":"chromium","status":"unexpected","results":[{
+					"status":"failed","duration":1,"retry":0,
+					"errors": [{
+						"message": "Request failed with status 401",
+						"stack": "Error: Request failed\n    Authorization: Bearer sk-prod-DEADBEEF\n    at axios.request (node_modules/axios/lib/core.js:99:7)"
+					}]
+				}]}]
+			}]
+		}]
+	}`
+	dir := t.TempDir()
+	resultsPath := filepath.Join(dir, "results.json")
+	_ = os.WriteFile(resultsPath, []byte(resultsJSON), 0o644)
+
+	var buf bytes.Buffer
+	rootCmd.SetOut(&buf)
+	rootCmd.SetErr(&buf)
+	rootCmd.SetArgs([]string{
+		"--api-key", "k",
+		"--base-url", srv.URL,
+		"run", "import", "--from", "playwright",
+		"--run", "RUN-42", "--project", "proj-uuid",
+		"--results-json", resultsPath,
+		dir,
+	})
+	if err := rootCmd.Execute(); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if uploadedFailureContent == "" {
+		t.Fatal("expected a failure.json upload")
+	}
+	dec, err := base64.StdEncoding.DecodeString(uploadedFailureContent)
+	if err != nil {
+		t.Fatalf("base64: %v", err)
+	}
+	plain := string(dec)
+	if strings.Contains(plain, "sk-prod-DEADBEEF") {
+		t.Errorf("Bearer token leaked into failure.json:\n%s", plain)
+	}
+	// Sanity: the stack field itself still exists (we redacted the
+	// matching LINE, not the whole field) and shows the redaction
+	// sentinel — confirms the redactor actually engaged on Stack.
+	if !strings.Contains(plain, "redacted by observo") {
+		t.Errorf("expected redaction sentinel in uploaded failure.json; got:\n%s", plain)
+	}
+}
+
+// Regression for R5 #4 (LOW): dry-run counters reflect work actually
+// done via the API. Pre-fix steps_patched and attachments_ok climbed
+// even when no PATCH/POST was issued; a CI pre-flight asserting
+// counters==0 broke unexpectedly.
+func TestRunImport_E2E_DryRunSummaryCountsZeroAPI(t *testing.T) {
+	resetRunImportFlags()
+	resetRootFlags()
+
+	ms := &mockServer{}
+	srv := httptest.NewServer(ms.handler(t, nil))
+	defer srv.Close()
+
+	// Use the same fixture as the happy-path test so we know specs +
+	// steps + attachments would all be non-zero in a real run.
+	dir := t.TempDir()
+	att := filepath.Join(dir, "video.webm")
+	_ = os.WriteFile(att, []byte("x"), 0o644)
+	resultsPath := filepath.Join(dir, "results.json")
+	_ = os.WriteFile(resultsPath, mustReadStaged(t, dir, att), 0o644)
+
+	var stdout bytes.Buffer
+	rootCmd.SetOut(&stdout)
+	rootCmd.SetErr(io.Discard)
+	rootCmd.SetArgs([]string{
+		"--api-key", "k",
+		"--base-url", srv.URL,
+		"--json",
+		"run", "import", "--from", "playwright",
+		"--run", "RUN-42", "--project", "proj-uuid",
+		"--results-json", resultsPath,
+		"--dry-run",
+		dir,
+	})
+	if err := rootCmd.Execute(); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+
+	var summary map[string]any
+	if err := json.Unmarshal(stdout.Bytes(), &summary); err != nil {
+		t.Fatalf("summary JSON: %v\n%s", err, stdout.String())
+	}
+	if got, _ := summary["steps_patched"].(float64); got != 0 {
+		t.Errorf("dry-run steps_patched must be 0, got %v", got)
+	}
+	if got, _ := summary["attachments_ok"].(float64); got != 0 {
+		t.Errorf("dry-run attachments_ok must be 0, got %v", got)
+	}
+	// Sanity: parsing counters still climb — dry-run still proves the
+	// plan, just doesn't claim API operations happened.
+	if got, _ := summary["total_specs"].(float64); got == 0 {
+		t.Errorf("dry-run total_specs must still count parsed specs, got 0")
+	}
+}
+
+// Regression for R5 #3 (MED): the run-import-specific error must NOT
+// leak the shared helper's --run-id text (this subcommand uses --run).
+// Pre-fix `%w`-wrapping appended the inner error string after the
+// outer one, so users still saw "--run-id" and got pointed at a flag
+// that doesn't exist on `run import`.
+func TestRunImport_E2E_ErrorDoesNotLeakRunIDText(t *testing.T) {
+	resetRunImportFlags()
+	resetRootFlags()
+
+	dir := t.TempDir()
+	resultsPath := filepath.Join(dir, "results.json")
+	_ = os.WriteFile(resultsPath, []byte(`{"config":{}, "suites":[]}`), 0o644)
+
+	var buf bytes.Buffer
+	rootCmd.SetOut(&buf)
+	rootCmd.SetErr(&buf)
+	rootCmd.SetArgs([]string{
+		"--api-key", "k",
+		"--base-url", "https://example",
+		"run", "import", "--from", "playwright",
+		"--results-json", resultsPath,
+		"--state-file", filepath.Join(dir, "no-such-state.json"),
+		dir,
+	})
+	err := rootCmd.Execute()
+	if err == nil {
+		t.Fatal("expected error when project/run flags + state file all missing")
+	}
+	msg := err.Error()
+	if strings.Contains(msg, "--run-id") {
+		t.Errorf("error must not surface --run-id (flag of other subcommands); got: %s", msg)
+	}
+	if !strings.Contains(msg, "--run") {
+		t.Errorf("error must still mention --run for this subcommand; got: %s", msg)
+	}
+}
+
 // Regression for review R4: when a parent `describe()` carries an OB-N
 // code AND the inner `test()` carries a different OB-N code (very real
 // pattern — e.g. `describe("OB-3 Auth", () => test("OB-7 login flow",

@@ -107,6 +107,30 @@ func TestExtractFailure_PathTraversalRejected(t *testing.T) {
 	}
 }
 
+// Regression for R5 #2 (MED): when root=="" (orchestrator's last-resort
+// fallback path itself failed — e.g. os.Getwd returned an error on a
+// CI runner whose cwd was deleted under it), readSourceExcerpt must
+// refuse to open ANY path rather than running unguarded. Pre-fix the
+// guard short-circuited on empty root and an absolute /etc/passwd
+// would be opened and embedded into failure.json.
+func TestExtractFailure_EmptyRootReturnsEmpty(t *testing.T) {
+	in := PWError{
+		Message: "boom",
+		Location: &struct {
+			File   string `json:"file"`
+			Line   int    `json:"line"`
+			Column int    `json:"column"`
+		}{File: "/etc/passwd", Line: 1},
+	}
+	f := ExtractFailure(in, "")
+	if f.SourceExcerpt != "" {
+		t.Errorf("empty root must yield empty source_excerpt; got:\n%s", f.SourceExcerpt)
+	}
+	if strings.Contains(f.SourceExcerpt, "root:") {
+		t.Errorf("/etc/passwd content leaked despite empty root:\n%s", f.SourceExcerpt)
+	}
+}
+
 func TestExtractFailure_NoLocationNoExcerpt(t *testing.T) {
 	f := ExtractFailure(PWError{Message: "boom"}, t.TempDir())
 	if f.Location != nil || f.SourceExcerpt != "" {

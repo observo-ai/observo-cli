@@ -184,6 +184,64 @@ func TestExtractTrace_TraceErrorDoesNotDropNetwork(t *testing.T) {
 	}
 }
 
+// Regression for R5 #5 (LOW): when the scanner errors midway through
+// trace.trace (oversized line), entries collected BEFORE the bad line
+// must be preserved — not discarded along with the error. Pre-fix
+// `return nil, err` lost everything, and the orchestrator's
+// `len(tr.Console) > 0` guard then suppressed an upload despite N
+// valid console events being parseable.
+func TestExtractTrace_ScannerErrorPreservesPriorEntries(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "trace.zip")
+
+	fh, err := os.Create(path)
+	if err != nil {
+		t.Fatalf("create zip: %v", err)
+	}
+	w := zip.NewWriter(fh)
+
+	// Two valid console events, then an oversized line (>4MB buffer
+	// cap in trace.go) that will trip the scanner.
+	traceFile, err := w.Create("trace.trace")
+	if err != nil {
+		t.Fatal(err)
+	}
+	good := []string{
+		`{"class":"BrowserContext","method":"console","time":1,"params":{"type":"log","text":"hello"}}`,
+		`{"class":"BrowserContext","method":"console","time":2,"params":{"type":"warn","text":"world"}}`,
+	}
+	if _, err := traceFile.Write([]byte(strings.Join(good, "\n") + "\n")); err != nil {
+		t.Fatal(err)
+	}
+	huge := strings.Repeat("a", 5*1024*1024)
+	if _, err := traceFile.Write([]byte(huge + "\n")); err != nil {
+		t.Fatal(err)
+	}
+
+	// Empty network stream — keeps the test focused on the trace path.
+	if _, err := w.Create("trace.network"); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := fh.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	redact, _ := NewRedactor("")
+	out, err := ExtractTrace(path, redact)
+	if err == nil {
+		t.Errorf("expected joined error from oversized line")
+	}
+	if len(out.Console) != 2 {
+		t.Errorf("expected 2 preserved console entries, got %d: %+v", len(out.Console), out.Console)
+	}
+	if len(out.Console) >= 2 && out.Console[1].Message != "world" {
+		t.Errorf("preserved entries lost shape: got %+v", out.Console[1])
+	}
+}
+
 // Regression for review finding #2: previously the recogniser said
 // `method != "console" && class != "BrowserContext"` — `&&` not `||` —
 // which admitted ANY BrowserContext event (navigate, route, …) into
