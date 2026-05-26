@@ -5,8 +5,6 @@ CLI for pushing CI test runs, coverage, and live test status to [Observo](https:
 [![Release](https://img.shields.io/github/v/release/observo-ai/observo-cli)](https://github.com/observo-ai/observo-cli/releases)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue)](LICENSE)
 
-> **v0.2.0 (OB-B) ships the CLI foundation:** cobra command tree, `OBSERVO_API_KEY` env wiring, retry-aware HTTP client, `--json` output mode. The functional subcommands (`run create`, `run case set`, `run attach`, `run pipeline-layer set`, `plan resolve`) land per-subcommand in v0.3.0..v0.7.0 (OB-C..F). See [OB-336](https://dineviser.atlassian.net/browse/OB-336).
-
 ## Install
 
 | Channel | Command |
@@ -34,16 +32,14 @@ curl -fsSL https://cli.observoai.co/install | bash -s -- --version v0.1.0
 
 Other channels follow each tool's native pinning (`brew install observo-ai/tap/observo@0.1.0`, `npm install -g @observo-ai/cli@0.1.0`, `ghcr.io/observo-ai/observo-cli:v0.1.0`).
 
-## Usage (preview)
+## Usage
 
 ```text
 observo <command> [global flags]
 
-COMMANDS (v0.2.0):
-  version      Print version, commit, build date
-  help         Show this help
-
 COMMANDS:
+  version                  Print version, commit, build date
+  help                     Show this help
   run create               Create a TestRun from a regression plan
   run finish               Mark a run passed/failed/aborted
   run case set             PATCH a run-case status by short code
@@ -179,6 +175,37 @@ observo run import --from playwright ./test-results --run RUN-42 --dry-run
 Parses the directory and prints the plan (which short codes resolve, which
 attachments would upload) without making API calls. No `OBSERVO_API_KEY`
 required.
+
+### Extract-only mode (companion to a live reporter)
+
+When your run already has a live writeback reporter handling case + step
+status and raw artifact uploads (e.g. the Observo Playwright reporter in
+your `playwright.config.ts`), use `--extract-only` to add JUST the
+extracted `console.json` / `network.json` / `failure.json` artifacts —
+without re-PATCHing case status or re-uploading the raw video / trace /
+screenshot files.
+
+```bash
+# Live reporter ran during the Playwright suite; this adds the extracted
+# JSON artifacts post-mortem.
+observo run import --from playwright ./test-results --run RUN-42 --extract-only
+```
+
+What it skips:
+
+- `PATCH /api/runs/.../cases/{code}` (case status)
+- `PATCH /api/runs/.../cases/.../steps/N` (step status)
+- `POST /api/projects/.../attachments:upload` for raw `*.webm` / `*.zip` / `*.png`
+
+What it still does:
+
+- Parses `results.json`, resolves short codes
+- Extracts `trace.zip` → uploads `console.json` + `network.json` (when present)
+- Builds `failure.json` from `errors[]` and uploads it (failed/blocked cases)
+
+Without `--extract-only`, running the import alongside a live reporter
+duplicates attachment rows in the dashboard and produces redundant PATCH
+traffic — `--extract-only` is the clean composition pattern.
 
 ## License
 

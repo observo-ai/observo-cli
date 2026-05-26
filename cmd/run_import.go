@@ -30,6 +30,7 @@ var (
 	riRedact      string
 	riUploadPass  bool
 	riDryRun      bool
+	riExtractOnly bool
 	riStateFile   string
 )
 
@@ -84,6 +85,7 @@ func init() {
 	f.StringVar(&riRedact, "redact", "", "extra regex applied to network/failure bodies (combined with the built-in default)")
 	f.BoolVar(&riUploadPass, "upload-passed", false, "also upload attachments for passing cases (default: failed/blocked only)")
 	f.BoolVar(&riDryRun, "dry-run", false, "parse and print the plan; do not call the API")
+	f.BoolVar(&riExtractOnly, "extract-only", false, "skip case/step PATCHes and raw artifact uploads; only extract trace + errors into console.json / network.json / failure.json and upload those (for runs that already have a live writeback reporter handling status)")
 	f.StringVar(&riStateFile, "state-file", state.DefaultPath, "where to read project/run from when flags are unset")
 }
 
@@ -271,19 +273,28 @@ func runImportExec(cmd *cobra.Command, args []string) error {
 
 		// PATCH case status first so subsequent attachment uploads can
 		// scope to a run-case row that the server now knows about.
-		if !riDryRun {
+		// --extract-only skips this: an upstream live reporter
+		// (e.g. e2e/reporters/observo-reporter.ts) is presumed to be
+		// PATCHing status + steps already; this command then runs only
+		// to extract + upload console.json / network.json /
+		// failure.json that the reporter doesn't produce.
+		switch {
+		case riExtractOnly:
+			// no log — extract-only intentionally hides what it skips
+		case riDryRun:
+			fmt.Fprintf(stderr, "would PATCH %s status=%s\n", code, status)
+		default:
 			if err := client.EnsureAndUpdateRunCase(ctx, runID, code, status); err != nil {
 				fmt.Fprintf(stderr, "%s: PATCH case status: %v\n", code, err)
 				// Continue to attachments anyway — server may have the
 				// case already attached and reject is on something else.
 			}
-		} else {
-			fmt.Fprintf(stderr, "would PATCH %s status=%s\n", code, status)
 		}
 
 		// Top-level test.step → run-case step PATCH (1-based). Mirrors
 		// the live reporter rule: only category="test.step" maps;
-		// expect/hook/fixture/pw:api don't.
+		// expect/hook/fixture/pw:api don't. --extract-only skips this
+		// for the same reason as the case PATCH above.
 		stepIdx := 0
 		for _, step := range final.Steps {
 			if step.Category != "test.step" {
@@ -295,6 +306,9 @@ func runImportExec(cmd *cobra.Command, args []string) error {
 			if step.Error != nil {
 				stepStatus = "failed"
 				stepComment = step.Error.Message
+			}
+			if riExtractOnly {
+				continue
 			}
 			if !riDryRun {
 				if err := client.UpdateRunCaseStep(ctx, api.UpdateRunCaseStepRequest{
@@ -330,37 +344,43 @@ func runImportExec(cmd *cobra.Command, args []string) error {
 			return
 		}
 
-		// 1. Direct artifact files (.webm / .zip / .png / etc.)
-		for _, att := range final.Attachments {
-			if att.Path == "" {
-				// Playwright can emit small attachments (custom
-				// test.info().attach() with a buffer payload) as
-				// inline base64 in `body` with no `path`. v1 doesn't
-				// decode+upload these — warn so the user knows a named
-				// attachment was skipped rather than silently lost.
-				if att.Body != "" {
-					fmt.Fprintf(stderr,
-						"%s: skipping inline attachment %q (no file path; v1 only uploads path-backed attachments)\n",
-						code, att.Name)
-				}
-				continue
-			}
-			if !riDryRun {
-				if _, err := client.UploadAttachment(ctx, api.UploadAttachmentRequest{
-					ProjectID: projectID,
-					RunID:     runID,
-					RunCaseID: code,
-					FilePath:  att.Path,
-				}); err != nil {
-					fmt.Fprintf(stderr, "%s: upload %s: %v\n", code, att.Name, err)
-					summary.AttachmentsErr++
+		// 1. Direct artifact files (.webm / .zip / .png / etc.).
+		// --extract-only skips raw uploads — the live reporter that
+		// owns case/step PATCHes is presumed to push these already,
+		// so re-uploading via the CLI would duplicate attachment rows
+		// in the dashboard.
+		if !riExtractOnly {
+			for _, att := range final.Attachments {
+				if att.Path == "" {
+					// Playwright can emit small attachments (custom
+					// test.info().attach() with a buffer payload) as
+					// inline base64 in `body` with no `path`. v1 doesn't
+					// decode+upload these — warn so the user knows a named
+					// attachment was skipped rather than silently lost.
+					if att.Body != "" {
+						fmt.Fprintf(stderr,
+							"%s: skipping inline attachment %q (no file path; v1 only uploads path-backed attachments)\n",
+							code, att.Name)
+					}
 					continue
 				}
-				summary.AttachmentsOK++
-			} else {
-				fmt.Fprintf(stderr, "would upload %s for %s\n", att.Path, code)
+				if !riDryRun {
+					if _, err := client.UploadAttachment(ctx, api.UploadAttachmentRequest{
+						ProjectID: projectID,
+						RunID:     runID,
+						RunCaseID: code,
+						FilePath:  att.Path,
+					}); err != nil {
+						fmt.Fprintf(stderr, "%s: upload %s: %v\n", code, att.Name, err)
+						summary.AttachmentsErr++
+						continue
+					}
+					summary.AttachmentsOK++
+				} else {
+					fmt.Fprintf(stderr, "would upload %s for %s\n", att.Path, code)
+				}
 			}
-		}
+		} // end !riExtractOnly raw-upload block
 
 		// 2. Extracted console.json + network.json from trace.zip (if any).
 		//    Guard with len(...) > 0 so a trace without console events
@@ -602,4 +622,3 @@ func summaryHuman(s importSummary) string {
 		prefix, s.Run, s.TotalSpecs, s.ResolvedCases, s.SkippedNoCode,
 		s.AttachmentsOK, s.AttachmentsErr, s.StepsPatched)
 }
-
