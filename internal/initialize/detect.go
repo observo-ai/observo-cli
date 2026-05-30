@@ -123,10 +123,31 @@ type PlaywrightConfig struct {
 	SpecFiles  []string // discovered *.spec.ts under the config's project dir
 }
 
+// skipDirsForWalk is the explicit set of directories the FindPlaywrightConfig
+// walk descends INTO false. Listed by name rather than a blanket "anything
+// starting with `.`" because some monorepos use dot-prefixed convention dirs
+// (e.g. `.apps/web/`) that may legitimately host a playwright.config.ts. The
+// earlier blanket-exclude version of this skip would produce a misleading
+// "playwright not detected" error for those layouts.
+//
+// Add new entries here when they're known noise / cause-of-slow-scans, not
+// preemptively for the dot-prefix pattern.
+var skipDirsForWalk = map[string]bool{
+	"node_modules": true,
+	".git":         true,
+	".cache":       true,
+	".next":        true,
+	".turbo":       true,
+	".nuxt":        true,
+	".svelte-kit":  true,
+	"dist":         true,
+	"build":        true,
+}
+
 // FindPlaywrightConfig walks the repo from cwd looking for playwright.config.ts
-// or .js. Skips node_modules + .git for speed. Returns the first match — for
-// monorepos with multiple Playwright projects, the user must specify path
-// explicitly via --config (a follow-up flag).
+// or .js. Skips known noise dirs (see skipDirsForWalk) for speed. Returns the
+// first match — for monorepos with multiple Playwright projects, the user must
+// specify path explicitly via --config (a follow-up flag).
 func FindPlaywrightConfig(cwd string) (*PlaywrightConfig, error) {
 	var found string
 	err := filepath.WalkDir(cwd, func(path string, d fs.DirEntry, err error) error {
@@ -134,8 +155,7 @@ func FindPlaywrightConfig(cwd string) (*PlaywrightConfig, error) {
 			return nil // skip unreadable dirs
 		}
 		if d.IsDir() {
-			base := d.Name()
-			if base == "node_modules" || base == ".git" || strings.HasPrefix(base, ".") && base != "." {
+			if skipDirsForWalk[d.Name()] {
 				return fs.SkipDir
 			}
 			return nil

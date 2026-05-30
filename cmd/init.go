@@ -65,7 +65,14 @@ func init() {
 
 func initExec(cmd *cobra.Command, _ []string) error {
 	out := cmd.OutOrStdout()
-	in := cmd.InOrStdin()
+	// Allocate ONE bufio.Reader and thread it through every prompt call.
+	// bufio.NewReader reads ahead into a 4 KB internal buffer when the
+	// underlying reader is a pipe — allocating a fresh reader per prompt
+	// would discard whatever bytes the previous one buffered (including
+	// the answer to the next prompt). Concrete repro of the lost-input
+	// failure: `printf 'PLAN\ny\n' | observo init` would swallow the `y`
+	// and silently apply with the default Yes.
+	in := bufio.NewReader(cmd.InOrStdin())
 
 	cwd, err := os.Getwd()
 	if err != nil {
@@ -254,10 +261,13 @@ Next:
 
 // --- prompts ----------------------------------------------------------------
 
-func promptDefault(in io.Reader, out io.Writer, prompt, def string) string {
+// Both prompt helpers take a SHARED *bufio.Reader so the read-ahead buffer
+// is preserved between prompts. See the comment at the in= line in
+// initExec for the failure mode this prevents.
+
+func promptDefault(in *bufio.Reader, out io.Writer, prompt, def string) string {
 	fmt.Fprintf(out, "  %s ", prompt)
-	r := bufio.NewReader(in)
-	line, _ := r.ReadString('\n')
+	line, _ := in.ReadString('\n')
 	line = strings.TrimSpace(line)
 	if line == "" {
 		return def
@@ -265,14 +275,13 @@ func promptDefault(in io.Reader, out io.Writer, prompt, def string) string {
 	return line
 }
 
-func promptYesNo(in io.Reader, out io.Writer, prompt string, defaultYes bool) bool {
+func promptYesNo(in *bufio.Reader, out io.Writer, prompt string, defaultYes bool) bool {
 	hint := "[Y/n]"
 	if !defaultYes {
 		hint = "[y/N]"
 	}
 	fmt.Fprintf(out, "  %s %s ", prompt, hint)
-	r := bufio.NewReader(in)
-	line, _ := r.ReadString('\n')
+	line, _ := in.ReadString('\n')
 	line = strings.TrimSpace(strings.ToLower(line))
 	if line == "" {
 		return defaultYes
@@ -311,9 +320,6 @@ func resolveGitRoot(cwd string) (string, error) {
 func commitChanges(cmd *cobra.Command, cwd string, addPaths []string) error {
 	// Filter missing paths FIRST so we never switch the user's branch
 	// (via `git checkout -B`) only to discover there's nothing to stage.
-	// Earlier order swapped: an empty `existing` after a missing-files
-	// pass left the user on chore/observo-init with the only feedback
-	// being a "no paths" error message.
 	var existing []string
 	for _, p := range addPaths {
 		abs := p
@@ -329,18 +335,48 @@ func commitChanges(cmd *cobra.Command, cwd string, addPaths []string) error {
 	if len(existing) == 0 {
 		return fmt.Errorf("no paths to commit (all candidate files missing on disk)")
 	}
+
+	// Capture the user's current branch BEFORE we switch. If the commit
+	// fails later (no user.email, pre-commit hook reject, …) we restore
+	// to avoid leaving the user stranded on chore/observo-init with
+	// modified-but-uncommitted files and no recovery hint.
+	prevBranch := currentBranch(cmd, cwd)
 	if err := runGit(cmd, cwd, "checkout", "-B", "chore/observo-init"); err != nil {
 		return fmt.Errorf("git checkout: %w", err)
 	}
 	// `git commit --only -- <paths>` commits ONLY the listed paths even if
-	// the user had other unrelated changes pre-staged (`git add` before
-	// running `observo init`). Without --only those foreign staged changes
-	// would silently land in the chore/observo-init branch.
+	// the user had other unrelated changes pre-staged. Without --only those
+	// foreign staged changes would silently land in chore/observo-init.
 	args := append([]string{"commit", "--only", "-m", "chore: integrate Observo CI (observo init)", "--"}, existing...)
 	if err := runGit(cmd, cwd, args...); err != nil {
+		// Roll back the branch switch so the user is back where they were
+		// before init started. Working-tree changes (the patch + workflow)
+		// stay — they're recoverable with `git stash` / `git diff`.
+		if prevBranch != "" {
+			if rerr := runGit(cmd, cwd, "checkout", prevBranch); rerr != nil {
+				fmt.Fprintf(cmd.ErrOrStderr(), "  ⚠ commit failed AND could not restore %s: %v\n", prevBranch, rerr)
+			} else {
+				fmt.Fprintf(cmd.ErrOrStderr(), "  ⓘ commit failed — restored you to %s; working-tree changes preserved\n", prevBranch)
+			}
+		}
 		return fmt.Errorf("git commit: %w", err)
 	}
 	return nil
+}
+
+// currentBranch returns the branch name the working tree is on, or empty
+// string if the call fails (detached HEAD, non-git, etc.). Best-effort —
+// only used to enable the branch-restore on commit failure.
+func currentBranch(cmd *cobra.Command, cwd string) string {
+	out, err := exec.Command("git", "-C", cwd, "rev-parse", "--abbrev-ref", "HEAD").Output()
+	if err != nil {
+		return ""
+	}
+	name := strings.TrimSpace(string(out))
+	if name == "HEAD" {
+		return "" // detached HEAD — nothing to restore to
+	}
+	return name
 }
 
 func runGit(cmd *cobra.Command, cwd string, args ...string) error {

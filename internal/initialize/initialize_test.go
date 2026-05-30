@@ -101,6 +101,33 @@ func TestFindPlaywrightConfig(t *testing.T) {
 	}
 }
 
+func TestFindPlaywrightConfig_DotPrefixedDirectoriesAreScanned(t *testing.T) {
+	// Regression: the walk used to skip ALL dot-prefixed dirs ("HasPrefix .")
+	// which excluded `.apps/web/` and similar legitimate convention dirs.
+	// Now only an explicit allowlist is skipped — playwright.config.ts under
+	// a non-noise dot-dir must be found.
+	dir := t.TempDir()
+	must := func(err error) {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	must(os.MkdirAll(filepath.Join(dir, ".apps", "web"), 0o755))
+	must(os.WriteFile(filepath.Join(dir, ".apps", "web", "playwright.config.ts"), []byte("export default {}"), 0o644))
+	// Negative control: noise dirs are still skipped.
+	must(os.MkdirAll(filepath.Join(dir, ".next", "junk"), 0o755))
+	must(os.WriteFile(filepath.Join(dir, ".next", "junk", "playwright.config.ts"), []byte("export default {}"), 0o644))
+
+	cfg, err := FindPlaywrightConfig(dir)
+	if err != nil {
+		t.Fatalf("find: %v", err)
+	}
+	want := filepath.Join(".apps", "web", "playwright.config.ts")
+	if cfg.ConfigPath != want {
+		t.Errorf("config = %q, want %q (should descend into .apps/, skip .next/)", cfg.ConfigPath, want)
+	}
+}
+
 func TestFindPlaywrightConfig_NotFound(t *testing.T) {
 	dir := t.TempDir()
 	_, err := FindPlaywrightConfig(dir)
