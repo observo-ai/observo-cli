@@ -87,23 +87,20 @@ jobs:
       - run: npx playwright install --with-deps
       - run: npx playwright test
 
-      # observo-ai/setup@v1 writes OBSERVO_TOKEN + OBSERVO_RUN_KEY to
-      # $GITHUB_ENV, so they are visible to every subsequent step in this
-      # job as ordinary env vars. -f makes curl exit non-zero on HTTP
-      # errors and || exit 1 ensures finalization failure surfaces in the
-      # job result instead of being silently swallowed.
+      # Finalize the Observo run via the CLI rather than raw curl — the
+      # real backend endpoint is PATCH /api/projects/{project_id}/runs/{run_id}
+      # with UUIDs (see observo-cli internal/api/runs.go). The "observo run
+      # finish --status auto" subcommand reads project_id + run_id from the
+      # state file that "observo run create" (inside observo-ai/setup@v1)
+      # wrote earlier in the pipeline. "if: always()" runs it even on
+      # test failure.
       - name: Finalize Observo run
         if: always()
         run: |
-          if [ -z "$OBSERVO_RUN_KEY" ] || [ -z "$OBSERVO_TOKEN" ]; then
-            echo "::error::Observo env vars missing — setup-action probably failed earlier"
-            exit 1
+          if ! command -v observo >/dev/null 2>&1; then
+            npm install -g @observo-ai/cli
           fi
-          curl -fsS -X POST \
-            -H "Authorization: Bearer $OBSERVO_TOKEN" \
-            -H "Content-Type: application/json" \
-            -d '{"status":"auto"}' \
-            "https://api.observoai.co/api/runs/$OBSERVO_RUN_KEY:finish" || exit 1
+          observo run finish --status auto
 `, name, node, spec.PlanKey)
 }
 
@@ -126,6 +123,11 @@ func WriteWorkflow(dest, content string) error {
 // Used at the prompt to warn the customer that running `observo init` will
 // create a SECOND e2e workflow — they may want to patch the existing one
 // instead.
+//
+// Skips our own generated `observo.yml` — that file contains
+// `npx playwright test` itself, so on every re-run after the first init the
+// detector would otherwise find observo.yml and print a misleading "you
+// already have a Playwright workflow" warning about the file we just wrote.
 func DetectExistingPlaywrightWorkflow(repoRoot string) (string, error) {
 	dir := filepath.Join(repoRoot, ".github", "workflows")
 	entries, err := os.ReadDir(dir)
@@ -140,6 +142,10 @@ func DetectExistingPlaywrightWorkflow(repoRoot string) (string, error) {
 			continue
 		}
 		if !strings.HasSuffix(e.Name(), ".yml") && !strings.HasSuffix(e.Name(), ".yaml") {
+			continue
+		}
+		if e.Name() == "observo.yml" {
+			// Self-match guard — see func-doc comment.
 			continue
 		}
 		path := filepath.Join(dir, e.Name())

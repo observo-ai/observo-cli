@@ -341,6 +341,13 @@ func commitChanges(cmd *cobra.Command, cwd string, addPaths []string) error {
 	// to avoid leaving the user stranded on chore/observo-init with
 	// modified-but-uncommitted files and no recovery hint.
 	prevBranch := currentBranch(cmd, cwd)
+	// `git checkout -B` resets the branch tip silently. If chore/observo-init
+	// already exists (re-run of init after an aborted PR), the previous tip
+	// — possibly unpushed commits — is orphaned. Guard: refuse to overwrite
+	// an existing branch; tell the user how to recover.
+	if branchExists(cwd, "chore/observo-init") {
+		return fmt.Errorf("branch chore/observo-init already exists — delete it (git branch -D chore/observo-init) or rename it before re-running observo init, to avoid silently moving its tip and orphaning prior commits")
+	}
 	if err := runGit(cmd, cwd, "checkout", "-B", "chore/observo-init"); err != nil {
 		return fmt.Errorf("git checkout: %w", err)
 	}
@@ -377,6 +384,13 @@ func currentBranch(cmd *cobra.Command, cwd string) string {
 		return "" // detached HEAD — nothing to restore to
 	}
 	return name
+}
+
+// branchExists returns true iff the named branch resolves to a commit. Uses
+// `git rev-parse --verify <name>` which is the canonical existence check.
+func branchExists(cwd, name string) bool {
+	err := exec.Command("git", "-C", cwd, "rev-parse", "--verify", "--quiet", "refs/heads/"+name).Run()
+	return err == nil
 }
 
 func runGit(cmd *cobra.Command, cwd string, args ...string) error {

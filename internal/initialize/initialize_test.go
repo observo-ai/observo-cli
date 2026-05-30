@@ -61,15 +61,27 @@ func TestParseRemoteURL_Rejects(t *testing.T) {
 
 func TestDerivePlanName(t *testing.T) {
 	cases := map[string]string{
-		"example-app":           "EXAMPLE-APP-E2E",
-		"foo":                   "FOO-E2E",
-		"weird.name_123":        "WEIRD-NAME_123-E2E",
-		"already-e2e":           "ALREADY-E2E",
-		"":                      "E2E",
+		"example-app":    "EXAMPLE-APP-E2E",
+		"foo":            "FOO-E2E",
+		"weird.name_123": "WEIRD-NAME_123-E2E",
+		"already-e2e":    "ALREADY-E2E",
+		"":               "E2E",
+		// Leading-underscore repo name: trim must remove `_` (not just `-`),
+		// else ValidatePlanKey rejects the result.
+		"_example": "EXAMPLE-E2E",
+		// Underscore-form _E2E suffix: must NOT be double-suffixed to
+		// FRONTEND_E2E-E2E. Both _E2E and -E2E suffix forms are honored.
+		"frontend_e2e": "FRONTEND_E2E",
 	}
 	for in, want := range cases {
-		if got := derivePlanName(in); got != want {
+		got := derivePlanName(in)
+		if got != want {
 			t.Errorf("derivePlanName(%q) = %q, want %q", in, got, want)
+		}
+		// Always must satisfy ValidatePlanKey too — otherwise a happy-path
+		// init flow would error after the prompt.
+		if err := ValidatePlanKey(got); err != nil {
+			t.Errorf("derivePlanName(%q) = %q which fails ValidatePlanKey: %v", in, got, err)
 		}
 	}
 }
@@ -199,16 +211,26 @@ func TestRenderWorkflow(t *testing.T) {
 		"plan: 'MY-PLAN-E2E'",
 		"id-token: write",
 		"node-version: '20'",
-		// finalize step must fail loud, not silently:
-		// - `-f` makes curl exit non-zero on HTTP errors
-		// - explicit env-var guard before the call
-		// - `|| exit 1` so a 401/5xx isn't swallowed
-		"curl -fsS",
-		`if [ -z "$OBSERVO_RUN_KEY" ]`,
-		"|| exit 1",
+		// Finalize step uses the official CLI (correct PATCH endpoint shape
+		// with project_id+run_id UUIDs read from state file), not raw curl.
+		// command -v gate avoids re-installing when the runner already has it.
+		"if: always()",
+		"command -v observo",
+		"npm install -g @observo-ai/cli",
+		"observo run finish --status auto",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("workflow missing %q in:\n%s", want, out)
+		}
+	}
+	// And make sure the broken curl shape is gone — regression guard.
+	for _, gone := range []string{
+		"curl -fsS",
+		":finish",
+		"$OBSERVO_RUN_KEY:finish",
+	} {
+		if strings.Contains(out, gone) {
+			t.Errorf("workflow still contains removed curl shape %q:\n%s", gone, out)
 		}
 	}
 }
@@ -640,5 +662,28 @@ func TestDetectExistingPlaywrightWorkflow(t *testing.T) {
 	}
 	if !strings.HasSuffix(got, "e2e.yml") {
 		t.Errorf("expected e2e.yml, got %s", got)
+	}
+}
+
+func TestDetectExistingPlaywrightWorkflow_SkipsObservoYml(t *testing.T) {
+	// Regression: our generated observo.yml contains `npx playwright test`
+	// itself, so on re-runs the detector would otherwise warn about the file
+	// we just wrote, contradicting reality (no second workflow is created
+	// since wfWillWrite is false).
+	dir := t.TempDir()
+	wfDir := filepath.Join(dir, ".github", "workflows")
+	if err := os.MkdirAll(wfDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	observoYml := RenderWorkflow(WorkflowSpec{PlanKey: "TEST-E2E"})
+	if err := os.WriteFile(filepath.Join(wfDir, "observo.yml"), []byte(observoYml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got, err := DetectExistingPlaywrightWorkflow(dir)
+	if err != nil {
+		t.Fatalf("detect: %v", err)
+	}
+	if got != "" {
+		t.Errorf("expected empty (observo.yml skipped), got %s", got)
 	}
 }

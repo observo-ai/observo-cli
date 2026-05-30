@@ -106,11 +106,17 @@ func derivePlanName(repoName string) string {
 	upper := strings.ToUpper(repoName)
 	// Strip anything that's not [A-Z0-9-_]; replace with dash.
 	cleaned := regexp.MustCompile(`[^A-Z0-9_-]`).ReplaceAllString(upper, "-")
-	cleaned = strings.Trim(cleaned, "-")
+	// Trim leading/trailing dashes AND underscores — ValidatePlanKey requires
+	// first char to be [A-Z0-9], so `_example` repo → `_EXAMPLE` would fail
+	// validation if the underscore survived.
+	cleaned = strings.Trim(cleaned, "-_")
 	if cleaned == "" {
 		return "E2E"
 	}
-	if strings.HasSuffix(cleaned, "-E2E") || cleaned == "E2E" {
+	// Check both suffix forms (dash + underscore). A repo named `frontend_e2e`
+	// produces `FRONTEND_E2E` and would otherwise get doubly-suffixed to
+	// `FRONTEND_E2E-E2E`.
+	if cleaned == "E2E" || strings.HasSuffix(cleaned, "-E2E") || strings.HasSuffix(cleaned, "_E2E") {
 		return cleaned
 	}
 	return cleaned + "-E2E"
