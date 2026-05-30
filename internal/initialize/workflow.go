@@ -113,7 +113,7 @@ jobs:
 // clobber a customer's existing CI config.
 func WriteWorkflow(dest, content string) error {
 	if _, err := os.Stat(dest); err == nil {
-		return fmt.Errorf("file already exists: %s (refusing to overwrite — patch the existing workflow manually or run with --force)", dest)
+		return fmt.Errorf("file already exists: %s (refusing to overwrite — remove the file and re-run, or patch it manually)", dest)
 	}
 	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
 		return err

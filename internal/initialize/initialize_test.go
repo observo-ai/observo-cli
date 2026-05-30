@@ -186,6 +186,136 @@ func TestRenderWorkflow(t *testing.T) {
 	}
 }
 
+func TestPatchPlaywrightConfig_CommentedOutReporterIgnored(t *testing.T) {
+	// Regression: previously the regex matched the FIRST `reporter:` token in
+	// the file, including inside `// ...` comments. The comment-out version
+	// would hijack the patch, leave the real array untouched, and on the
+	// next run the idempotency check would find @observo/playwright-reporter
+	// in the comment body and refuse to do anything.
+	dir := t.TempDir()
+	cfg := filepath.Join(dir, "playwright.config.ts")
+	original := `import { defineConfig } from '@playwright/test';
+// reporter: ['list']  // ← old config kept as reference, must not match
+/* reporter: [ ['junit'] ] */
+export default defineConfig({
+  reporter: [
+    ['list'],
+  ],
+});
+`
+	if err := os.WriteFile(cfg, []byte(original), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	res, err := PatchPlaywrightConfig(cfg)
+	if err != nil {
+		t.Fatalf("patch: %v", err)
+	}
+	if !res.Changed {
+		t.Fatalf("expected Changed=true, got Reason: %s", res.Reason)
+	}
+	// The REAL reporter array (inside defineConfig) must have been touched —
+	// look for the spread idiom in the area after `defineConfig`.
+	idx := strings.Index(res.NewContent, "defineConfig")
+	if idx < 0 {
+		t.Fatalf("defineConfig missing")
+	}
+	if !strings.Contains(res.NewContent[idx:], "...(process.env.CI") {
+		t.Errorf("real reporter array not patched (spread missing in defineConfig block):\n%s", res.NewContent)
+	}
+	// Original comments must still be present unchanged — masking is only for
+	// search, not output.
+	if !strings.Contains(res.NewContent, "// reporter: ['list']") {
+		t.Errorf("comment-out line was modified — masking must only affect SEARCH, not OUTPUT")
+	}
+}
+
+func TestMaskComments(t *testing.T) {
+	cases := []struct {
+		name     string
+		in       string
+		want     string
+	}{
+		{"plain", "abc", "abc"},
+		{"single-line comment", "abc // hi", "abc      "},
+		{"block comment", "ab /* hi */ cd", "ab          cd"},
+		{"block with newlines preserved", "a /* x\ny */ b", "a     \n     b"},
+		{"slash inside string", `"a/b/c"`, `"a/b/c"`},
+		{"comment marker inside string", `"//not a comment"`, `"//not a comment"`},
+		{"backtick string", "`/* not */`", "`/* not */`"},
+		{"escaped quote then comment", `"x\"y" // c`, `"x\"y"     `},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := maskComments(c.in)
+			if got != c.want {
+				t.Errorf("maskComments(%q) = %q, want %q", c.in, got, c.want)
+			}
+			if len(got) != len(c.in) {
+				t.Errorf("length mismatch: %d vs %d (must preserve offsets)", len(got), len(c.in))
+			}
+		})
+	}
+}
+
+func TestPatchPlaywrightConfig_MarkerPlacedAtRealReporter(t *testing.T) {
+	// Earlier `strings.Index(newContent, "reporter")` matched the FIRST
+	// occurrence anywhere — a variable like `const myReporter = ...` or
+	// even a comment would shift the audit marker far above the real array.
+	// Now we use the keyMatch offset directly.
+	dir := t.TempDir()
+	cfg := filepath.Join(dir, "playwright.config.ts")
+	original := `const myReporter = 'distraction'; // first 'reporter' token in file
+export default defineConfig({
+  reporter: [
+    ['list'],
+  ],
+});
+`
+	if err := os.WriteFile(cfg, []byte(original), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	res, err := PatchPlaywrightConfig(cfg)
+	if err != nil {
+		t.Fatalf("patch: %v", err)
+	}
+	if !res.Changed {
+		t.Fatal("expected Changed=true")
+	}
+	// Marker must appear AFTER `defineConfig(` (i.e. right above the real
+	// reporter line), NOT before `const myReporter`.
+	markerIdx := strings.Index(res.NewContent, "@observo:reporter")
+	defineIdx := strings.Index(res.NewContent, "defineConfig")
+	if markerIdx < 0 {
+		t.Fatal("audit marker missing")
+	}
+	if markerIdx < defineIdx {
+		t.Errorf("audit marker placed before defineConfig (= above wrong 'reporter' occurrence):\n%s", res.NewContent)
+	}
+}
+
+func TestWriteWorkflow_ErrorMentionsValidRecovery(t *testing.T) {
+	// The "file already exists" error must NOT reference --force (no such flag).
+	dir := t.TempDir()
+	dest := filepath.Join(dir, ".github", "workflows", "observo.yml")
+	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(dest, []byte("pre"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	err := WriteWorkflow(dest, "new")
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	msg := err.Error()
+	if strings.Contains(msg, "--force") {
+		t.Errorf("error message references non-existent --force flag: %q", msg)
+	}
+	if !strings.Contains(msg, "remove the file") {
+		t.Errorf("error message should mention valid recovery (remove file): %q", msg)
+	}
+}
+
 func TestWritePatch_PreservesMode(t *testing.T) {
 	dir := t.TempDir()
 	cfg := filepath.Join(dir, "playwright.config.ts")

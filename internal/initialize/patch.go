@@ -56,7 +56,14 @@ func PatchPlaywrightConfig(path string) (*PatchResult, error) {
 		}, nil
 	}
 
-	keyMatch := reporterKeyRegex.FindStringIndex(original)
+	// Search for the reporter key in a copy with comments masked out (spaces
+	// preserve byte offsets), so a commented-out `// reporter: ['list']` or
+	// `/* reporter: [...] */` block can't hijack the match. Without this
+	// guard the regex finds the first textual occurrence; we'd insert into
+	// the comment body, idempotency would then see @observo/playwright-reporter
+	// in the comment on the next run, and the real array would never be patched.
+	searchSpace := maskComments(original)
+	keyMatch := reporterKeyRegex.FindStringIndex(searchSpace)
 	if keyMatch == nil {
 		return &PatchResult{
 			Path: path, Original: original, NewContent: original,
@@ -85,24 +92,94 @@ func PatchPlaywrightConfig(path string) (*PatchResult, error) {
 	newContent := original[:start] + patched + original[end:]
 
 	// Add a marker comment immediately above the reporters line for human
-	// audit trail — helpful when someone asks "what did observo init do?"
+	// audit trail. Use the keyMatch offset directly — `strings.Index` would
+	// match the FIRST occurrence of "reporter" anywhere in the file (e.g. a
+	// variable `const myReporter` or a comment), putting the marker in the
+	// wrong place. Our inserted entry was added AT keyMatch[1] (after the
+	// opening `[`), so keyMatch[0] in `original` still points at the `r` of
+	// `reporter` in `newContent` (the insertion is after that index).
 	if !strings.Contains(newContent, reporterImportLine) {
-		// Find the line containing "reporter:" and prepend a marker on the
-		// previous line. This is a best-effort cosmetic touch — we don't
-		// fail patch if line-based location heuristics shift.
-		repIdx := strings.Index(newContent, "reporter")
-		if repIdx > 0 {
-			// Walk back to the start of the line to insert above it.
-			lineStart := strings.LastIndex(newContent[:repIdx], "\n") + 1
-			marker := strings.Repeat(" ", repIdx-lineStart) + reporterImportLine + "\n"
-			newContent = newContent[:lineStart] + marker + newContent[lineStart:]
-		}
+		repIdx := keyMatch[0]
+		// Walk back to the start of the line to insert above it.
+		lineStart := strings.LastIndex(newContent[:repIdx], "\n") + 1
+		marker := strings.Repeat(" ", repIdx-lineStart) + reporterImportLine + "\n"
+		newContent = newContent[:lineStart] + marker + newContent[lineStart:]
 	}
 
 	return &PatchResult{
 		Path: path, Original: original, NewContent: newContent,
 		Changed: true,
 	}, nil
+}
+
+// maskComments returns a copy of `s` where every byte inside a single-line
+// (`// ... \n`) or block (`/* ... */`) comment is replaced with a space.
+// Lengths are preserved so byte offsets into the result are valid offsets
+// into the original. Used to make regex searches comment-aware without
+// rebuilding an offset map.
+//
+// Skips `//` and `/*` that appear inside string literals (single / double
+// quoted, backtick template) — same string-handling shape as
+// findMatchingBracket below so the two stay consistent.
+func maskComments(s string) string {
+	out := []byte(s)
+	i := 0
+	for i < len(s) {
+		c := s[i]
+		switch c {
+		case '\'', '"', '`':
+			quote := c
+			i++
+			for i < len(s) {
+				if s[i] == '\\' && i+1 < len(s) {
+					i += 2
+					continue
+				}
+				if s[i] == quote {
+					i++
+					break
+				}
+				i++
+			}
+		case '/':
+			if i+1 >= len(s) {
+				i++
+				continue
+			}
+			switch s[i+1] {
+			case '/':
+				// single-line comment — mask to end of line (preserve newline)
+				start := i
+				for i < len(s) && s[i] != '\n' {
+					i++
+				}
+				for j := start; j < i; j++ {
+					out[j] = ' '
+				}
+			case '*':
+				// block comment — mask to `*/` (preserve newlines for line counting)
+				start := i
+				i += 2
+				for i+1 < len(s) {
+					if s[i] == '*' && s[i+1] == '/' {
+						i += 2
+						break
+					}
+					i++
+				}
+				for j := start; j < i; j++ {
+					if out[j] != '\n' {
+						out[j] = ' '
+					}
+				}
+			default:
+				i++
+			}
+		default:
+			i++
+		}
+	}
+	return string(out)
 }
 
 // findMatchingBracket walks `s` starting at `from` (which must be the index

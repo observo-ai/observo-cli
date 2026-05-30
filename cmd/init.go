@@ -308,15 +308,29 @@ func commitChanges(cmd *cobra.Command, cwd string, addPaths []string) error {
 	if err := runGit(cmd, cwd, "checkout", "-B", "chore/observo-init"); err != nil {
 		return fmt.Errorf("git checkout: %w", err)
 	}
+	// Filter out missing paths so `git commit --only -- <paths>` doesn't
+	// abort on a non-existent file. We still log a warning for visibility.
+	var existing []string
 	for _, p := range addPaths {
-		if err := runGit(cmd, cwd, "add", p); err != nil {
-			// Non-fatal: log to stderr but keep going. Common case is
-			// package-lock.json absent when --no-install was used; the
-			// other intended files still get staged.
-			fmt.Fprintf(cmd.ErrOrStderr(), "  ⚠ git add %s: %v (skipped)\n", p, err)
+		abs := p
+		if !filepath.IsAbs(abs) {
+			abs = filepath.Join(cwd, abs)
 		}
+		if _, err := os.Stat(abs); err != nil {
+			fmt.Fprintf(cmd.ErrOrStderr(), "  ⚠ %s missing: %v (skipped)\n", p, err)
+			continue
+		}
+		existing = append(existing, p)
 	}
-	if err := runGit(cmd, cwd, "commit", "-m", "chore: integrate Observo CI (observo init)"); err != nil {
+	if len(existing) == 0 {
+		return fmt.Errorf("no paths to commit")
+	}
+	// `git commit --only -- <paths>` commits ONLY the listed paths even if
+	// the user had other unrelated changes pre-staged (`git add` before
+	// running `observo init`). Without --only those foreign staged changes
+	// would silently land in the chore/observo-init branch.
+	args := append([]string{"commit", "--only", "-m", "chore: integrate Observo CI (observo init)", "--"}, existing...)
+	if err := runGit(cmd, cwd, args...); err != nil {
 		return fmt.Errorf("git commit: %w", err)
 	}
 	return nil
