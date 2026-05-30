@@ -90,12 +90,19 @@ func initExec(cmd *cobra.Command, _ []string) error {
 	fmt.Fprintf(out, "✓ Detected framework: Playwright at %s (%d spec files)\n", pwCfg.ConfigPath, len(pwCfg.SpecFiles))
 
 	// 3) Plan name. Flag wins; else prompt; else derive from repo name.
+	//    Validate the final value — auto-derived keys are already sanitized,
+	//    but --plan flag and prompted values can carry chars that confuse the
+	//    YAML scalar embed (`: `, leading `*` / `&`) or backend plan_key
+	//    constraints. Stop early with a clear error before we render anything.
 	planKey := initFlagPlan
 	if planKey == "" {
 		planKey = repo.DefaultPlan
 		if !initFlagYes {
 			planKey = promptDefault(in, out, fmt.Sprintf("Plan key (in Observo dashboard)? [%s]", repo.DefaultPlan), repo.DefaultPlan)
 		}
+	}
+	if err := initialize.ValidatePlanKey(planKey); err != nil {
+		return fmt.Errorf("invalid plan key: %w", err)
 	}
 	fmt.Fprintf(out, "✓ Plan key: %s\n", planKey)
 
@@ -173,7 +180,21 @@ func initExec(cmd *cobra.Command, _ []string) error {
 		fmt.Fprintln(out, "  ✓ Installed @observo/playwright-reporter")
 	}
 	if !initFlagNoCommit {
-		if err := commitChanges(cmd, cwd); err != nil {
+		// Build the path list from what we actually changed — hardcoding
+		// "playwright.config.ts" breaks for monorepos where the config lives
+		// in a subdirectory like web-portal/playwright.config.ts, because
+		// `git add <missing-path>` errors and was previously silently swallowed.
+		var addPaths []string
+		if patch.Changed {
+			addPaths = append(addPaths, pwCfg.ConfigPath)
+		}
+		if wfWillWrite {
+			addPaths = append(addPaths, relTo(cwd, wfDest))
+		}
+		if !initFlagNoInstall {
+			addPaths = append(addPaths, "package.json", "package-lock.json")
+		}
+		if err := commitChanges(cmd, cwd, addPaths); err != nil {
 			return fmt.Errorf("commit: %w", err)
 		}
 		fmt.Fprintln(out, "  ✓ Committed on branch chore/observo-init")
@@ -228,29 +249,33 @@ func runShell(cmd *cobra.Command, name string, args ...string) error {
 	return c.Run()
 }
 
-func commitChanges(cmd *cobra.Command, cwd string) error {
-	// Create branch (fresh; allow re-running on existing branch).
-	steps := [][]string{
-		{"git", "-C", cwd, "checkout", "-B", "chore/observo-init"},
-		{"git", "-C", cwd, "add",
-			"playwright.config.ts", "playwright.config.js", "playwright.config.mjs",
-			".github/workflows/observo.yml", "package.json", "package-lock.json"},
-		{"git", "-C", cwd, "commit", "-m", "chore: integrate Observo CI (observo init)"},
+func commitChanges(cmd *cobra.Command, cwd string, addPaths []string) error {
+	// Branch checkout + commit are fatal; `git add` of an optional path
+	// (package-lock.json may not exist if npm install was skipped) is
+	// tolerated so a missing companion file doesn't abort the whole step.
+	if err := runGit(cmd, cwd, "checkout", "-B", "chore/observo-init"); err != nil {
+		return fmt.Errorf("git checkout: %w", err)
 	}
-	for _, s := range steps {
-		// `git add` of non-existent paths errors — tolerate by adding silently.
-		c := exec.Command(s[0], s[1:]...)
-		c.Stdout = cmd.OutOrStdout()
-		c.Stderr = cmd.ErrOrStderr()
-		if err := c.Run(); err != nil {
-			// add of optional files is non-fatal
-			if s[1] == "-C" && s[3] == "add" {
-				continue
-			}
-			return fmt.Errorf("%s: %w", strings.Join(s, " "), err)
+	for _, p := range addPaths {
+		if err := runGit(cmd, cwd, "add", p); err != nil {
+			// Non-fatal: log to stderr but keep going. Common case is
+			// package-lock.json absent when --no-install was used; the
+			// other intended files still get staged.
+			fmt.Fprintf(cmd.ErrOrStderr(), "  ⚠ git add %s: %v (skipped)\n", p, err)
 		}
 	}
+	if err := runGit(cmd, cwd, "commit", "-m", "chore: integrate Observo CI (observo init)"); err != nil {
+		return fmt.Errorf("git commit: %w", err)
+	}
 	return nil
+}
+
+func runGit(cmd *cobra.Command, cwd string, args ...string) error {
+	full := append([]string{"-C", cwd}, args...)
+	c := exec.Command("git", full...)
+	c.Stdout = cmd.OutOrStdout()
+	c.Stderr = cmd.ErrOrStderr()
+	return c.Run()
 }
 
 // --- helpers ----------------------------------------------------------------

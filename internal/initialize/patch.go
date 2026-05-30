@@ -22,10 +22,11 @@ type PatchResult struct {
 // imports (Playwright lets you reference reporters by string) skip this.
 const reporterImportLine = `// @observo:reporter — added by 'observo init'`
 
-// observoReporterEntry is the array literal we insert into the reporters list.
-// Wrapped in process.env.CI guard so local runs don't ship test events to
-// Observo (mirrors PRD recommendation).
-const observoReporterEntry = `process.env.CI ? '@observo/playwright-reporter' : null,`
+// observoReporterEntry is what we insert at the start of the reporters
+// array. Uses the spread idiom rather than a ternary that emits `null`,
+// because pre-1.38 Playwright throws on null entries when destructuring
+// the reporter tuple. With spread, when CI is unset the array stays clean.
+const observoReporterEntry = `...(process.env.CI ? [['@observo/playwright-reporter']] : []),`
 
 // reportersArrayRegex matches the reporter: [...] array. Captures group 1 is
 // the array body so we can detect whether Observo is already in there.
@@ -59,7 +60,7 @@ func PatchPlaywrightConfig(path string) (*PatchResult, error) {
 			Path: path, Original: original, NewContent: original,
 			Changed: false,
 			Reason: "reporter array not found — config uses single-reporter form? Add manually:\n" +
-				"    reporter: [['list'], " + observoReporterEntry + " '@observo/playwright-reporter'].filter(Boolean)",
+				"    reporter: [" + observoReporterEntry + " ['list']]",
 		}, nil
 	}
 

@@ -164,10 +164,84 @@ func TestPatchPlaywrightConfig_NonArrayForm(t *testing.T) {
 
 func TestRenderWorkflow(t *testing.T) {
 	out := RenderWorkflow(WorkflowSpec{PlanKey: "MY-PLAN-E2E"})
-	for _, want := range []string{"observo-ai/setup@v1", "plan: MY-PLAN-E2E", "id-token: write", "node-version: '20'"} {
+	// plan: '...' (quoted) — single-quote wrapping guards against YAML scalar
+	// ambiguity for any plan_key, even though derivePlanName sanitizes the
+	// auto-derived form.
+	for _, want := range []string{"observo-ai/setup@v1", "plan: 'MY-PLAN-E2E'", "id-token: write", "node-version: '20'"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("workflow missing %q in:\n%s", want, out)
 		}
+	}
+}
+
+func TestValidatePlanKey(t *testing.T) {
+	good := []string{"E2E", "EXAMPLE-APP-E2E", "REGRESSION_2026_05", "X", "0", "ABC123"}
+	for _, k := range good {
+		if err := ValidatePlanKey(k); err != nil {
+			t.Errorf("ValidatePlanKey(%q) = %v, want nil", k, err)
+		}
+	}
+	bad := []string{
+		"",                  // empty
+		"lowercase",         // lowercase not allowed (would survive but PRD says uppercase)
+		"with space",        // space
+		"with:colon",        // YAML mapping ambiguity
+		"with'quote",        // would break single-quoted YAML embed
+		"*alias",            // YAML alias syntax
+		"&anchor",           // YAML anchor syntax
+		"-leading-dash",     // starts with dash → flag confusion in shell
+		"plan/with/slash",   // path-like
+	}
+	for _, k := range bad {
+		if err := ValidatePlanKey(k); err == nil {
+			t.Errorf("ValidatePlanKey(%q) = nil, want error", k)
+		}
+	}
+}
+
+func TestPatchPlaywrightConfig_SpreadIdiom(t *testing.T) {
+	// Make sure the patched output uses the spread idiom (no bare `null`)
+	// so pre-Playwright-1.38 versions don't choke on a null reporter entry
+	// during local runs.
+	dir := t.TempDir()
+	cfg := filepath.Join(dir, "playwright.config.ts")
+	original := `export default defineConfig({
+  reporter: [
+    ['list'],
+  ],
+});
+`
+	if err := os.WriteFile(cfg, []byte(original), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	res, err := PatchPlaywrightConfig(cfg)
+	if err != nil {
+		t.Fatalf("patch: %v", err)
+	}
+	if !res.Changed {
+		t.Fatalf("expected change")
+	}
+	if strings.Contains(res.NewContent, ": null,") {
+		t.Errorf("patched content still contains bare 'null' entry — pre-1.38 Playwright would throw:\n%s", res.NewContent)
+	}
+	if !strings.Contains(res.NewContent, "...(process.env.CI") {
+		t.Errorf("patched content missing spread idiom:\n%s", res.NewContent)
+	}
+}
+
+func TestPatchPlaywrightConfig_HintHasNoDuplicateReporter(t *testing.T) {
+	// Single-string reporter form → we return a Reason with a manual snippet.
+	// Snippet must mention @observo/playwright-reporter exactly ONCE (earlier
+	// version concatenated the entry constant with another literal copy).
+	dir := t.TempDir()
+	cfg := filepath.Join(dir, "playwright.config.ts")
+	if err := os.WriteFile(cfg, []byte(`export default defineConfig({ reporter: 'list' });`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	res, _ := PatchPlaywrightConfig(cfg)
+	count := strings.Count(res.Reason, "@observo/playwright-reporter")
+	if count != 1 {
+		t.Errorf("Reason mentions @observo/playwright-reporter %d times, want exactly 1:\n%s", count, res.Reason)
 	}
 }
 

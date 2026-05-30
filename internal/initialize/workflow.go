@@ -4,8 +4,29 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 )
+
+// validPlanKey constrains plan_key to chars that are safe both in YAML (no
+// quoting needed) and in URL-shaped Observo plan references. Anything else
+// risks: YAML parse errors (`: `, leading `*` / `&`), shell glob expansion
+// in CI invocations, or backend rejection at create_plan. Caller (cmd/init.go)
+// validates the --plan flag against this BEFORE rendering the workflow.
+var validPlanKey = regexp.MustCompile(`^[A-Z0-9][A-Z0-9_-]*$`)
+
+// ValidatePlanKey returns nil if key is safe to embed in a YAML scalar
+// unquoted. Used for the --plan flag override; auto-derived keys are
+// already sanitized by derivePlanName.
+func ValidatePlanKey(key string) error {
+	if key == "" {
+		return fmt.Errorf("plan key is empty")
+	}
+	if !validPlanKey.MatchString(key) {
+		return fmt.Errorf("plan key %q contains characters outside [A-Z0-9_-] (allowed for unambiguous YAML + URL embedding)", key)
+	}
+	return nil
+}
 
 // WorkflowSpec describes what to generate. Renderer is a plain template
 // substitution — we deliberately avoid text/template here so customer
@@ -60,7 +81,7 @@ jobs:
 
       - uses: observo-ai/setup@v1
         with:
-          plan: %s
+          plan: '%s'
 
       - run: npm ci
       - run: npx playwright install --with-deps
