@@ -174,7 +174,14 @@ func initExec(cmd *cobra.Command, _ []string) error {
 		fmt.Fprintf(out, "  ✓ Wrote %s\n", relTo(cwd, wfDest))
 	}
 	if !initFlagNoInstall {
-		if err := runShell(cmd, "npm", "install", "-D", "@observo/playwright-reporter"); err != nil {
+		// npm install runs in the directory that owns playwright.config.ts,
+		// not in process cwd. Monorepo with web-portal/playwright.config.ts
+		// has its own web-portal/package.json — installing at repo root
+		// would silently drop the dep into the wrong package.json (or fail
+		// if no root package.json exists). filepath.Dir handles the
+		// repo-root case too (Dir("playwright.config.ts") == ".").
+		pwDir := filepath.Join(cwd, filepath.Dir(pwCfg.ConfigPath))
+		if err := runShellIn(cmd, pwDir, "npm", "install", "-D", "@observo/playwright-reporter"); err != nil {
 			return fmt.Errorf("npm install: %w", err)
 		}
 		fmt.Fprintln(out, "  ✓ Installed @observo/playwright-reporter")
@@ -192,12 +199,23 @@ func initExec(cmd *cobra.Command, _ []string) error {
 			addPaths = append(addPaths, relTo(cwd, wfDest))
 		}
 		if !initFlagNoInstall {
-			addPaths = append(addPaths, "package.json", "package-lock.json")
+			// package.json + lock live next to the playwright config (monorepo case).
+			pkgDir := filepath.Dir(pwCfg.ConfigPath)
+			addPaths = append(addPaths,
+				filepath.Join(pkgDir, "package.json"),
+				filepath.Join(pkgDir, "package-lock.json"),
+			)
 		}
-		if err := commitChanges(cmd, cwd, addPaths); err != nil {
-			return fmt.Errorf("commit: %w", err)
+		if len(addPaths) == 0 {
+			// Nothing changed — skip the git operations entirely so we don't
+			// switch the user's working branch as a side-effect of a no-op.
+			fmt.Fprintln(out, "  ⊘ Nothing to commit (config already had reporter + workflow exists + --no-install)")
+		} else {
+			if err := commitChanges(cmd, cwd, addPaths); err != nil {
+				return fmt.Errorf("commit: %w", err)
+			}
+			fmt.Fprintln(out, "  ✓ Committed on branch chore/observo-init")
 		}
-		fmt.Fprintln(out, "  ✓ Committed on branch chore/observo-init")
 	}
 
 	// 11) Next-step hint.
@@ -243,7 +261,17 @@ func promptYesNo(in io.Reader, out io.Writer, prompt string, defaultYes bool) bo
 // --- side-effects -----------------------------------------------------------
 
 func runShell(cmd *cobra.Command, name string, args ...string) error {
+	return runShellIn(cmd, "", name, args...)
+}
+
+// runShellIn is the explicit-cwd variant. Used for npm install which must
+// target the package.json directory (the playwright project root, which in
+// monorepos is NOT process cwd).
+func runShellIn(cmd *cobra.Command, dir string, name string, args ...string) error {
 	c := exec.Command(name, args...)
+	if dir != "" {
+		c.Dir = dir
+	}
 	c.Stdout = cmd.OutOrStdout()
 	c.Stderr = cmd.ErrOrStderr()
 	return c.Run()

@@ -28,13 +28,15 @@ const reporterImportLine = `// @observo:reporter — added by 'observo init'`
 // the reporter tuple. With spread, when CI is unset the array stays clean.
 const observoReporterEntry = `...(process.env.CI ? [['@observo/playwright-reporter']] : []),`
 
-// reportersArrayRegex matches the reporter: [...] array. Captures group 1 is
-// the array body so we can detect whether Observo is already in there.
+// reporterKeyRegex finds the `reporter:` key + the opening `[` of the array.
+// We use the regex ONLY to locate the start of the array body — the matching
+// close-bracket is found by bracket-counting (findMatchingBracket) so that
+// `]` characters inside string literals (e.g. `outputFolder: 'reports[v2]'`)
+// or nested arrays/objects don't truncate the match.
 //
-// We DON'T support reporter: 'single-string' form — for that shape we leave
-// a TODO comment and skip patching. Customers using single-reporter configs
-// can convert to array themselves.
-var reportersArrayRegex = regexp.MustCompile(`reporter\s*:\s*\[([\s\S]*?)\]`)
+// We DON'T support reporter: 'single-string' form — that shape returns a hint
+// instead. Customers using a single-reporter literal can convert to array.
+var reporterKeyRegex = regexp.MustCompile(`reporter\s*:\s*\[`)
 
 // PatchPlaywrightConfig produces the post-patch content WITHOUT writing it.
 // Caller invokes os.WriteFile only after confirming with the user (--print
@@ -54,8 +56,8 @@ func PatchPlaywrightConfig(path string) (*PatchResult, error) {
 		}, nil
 	}
 
-	m := reportersArrayRegex.FindStringSubmatchIndex(original)
-	if m == nil {
+	keyMatch := reporterKeyRegex.FindStringIndex(original)
+	if keyMatch == nil {
 		return &PatchResult{
 			Path: path, Original: original, NewContent: original,
 			Changed: false,
@@ -64,11 +66,19 @@ func PatchPlaywrightConfig(path string) (*PatchResult, error) {
 		}, nil
 	}
 
-	// m[2..3] = inside-of-array text. Insert observo entry at the START of the
-	// array body so it precedes user reporters (consistent positioning aids
-	// future diff / re-patch detection).
-	start := m[2]
-	end := m[3]
+	// keyMatch[1] is index of the byte AFTER the opening `[`. Walk forward
+	// counting brackets to find the true close — handles nested arrays/objects
+	// and string literals containing `]`. If we can't find a matching close
+	// (truncated config / weird syntax), bail out cleanly.
+	start := keyMatch[1]
+	end, ok := findMatchingBracket(original, start)
+	if !ok {
+		return &PatchResult{
+			Path: path, Original: original, NewContent: original,
+			Changed: false,
+			Reason: "reporter array opening `[` found but no matching `]` — config syntax may be invalid; aborting patch",
+		}, nil
+	}
 	inside := original[start:end]
 	indent := detectIndent(inside)
 	patched := indent + observoReporterEntry + inside
@@ -93,6 +103,53 @@ func PatchPlaywrightConfig(path string) (*PatchResult, error) {
 		Path: path, Original: original, NewContent: newContent,
 		Changed: true,
 	}, nil
+}
+
+// findMatchingBracket walks `s` starting at `from` (which must be the index
+// IMMEDIATELY AFTER an opening `[`) and returns the index of the matching
+// close `]` plus true. It tracks nested `[`/`]` and skips `]` chars that
+// appear inside single-quoted, double-quoted, or backtick-template string
+// literals — the common JS shapes that trip a lazy regex like
+// `outputFolder: 'reports[v2]'`.
+//
+// Returns (0, false) if the input runs out before the matching close is found.
+// Comments and escape sequences are out of scope (cause: extremely rare
+// inside a reporters array, and adding them would multiply complexity).
+func findMatchingBracket(s string, from int) (int, bool) {
+	depth := 1
+	i := from
+	for i < len(s) {
+		c := s[i]
+		switch c {
+		case '\'', '"', '`':
+			// Skip to matching unescaped quote.
+			quote := c
+			i++
+			for i < len(s) {
+				if s[i] == '\\' && i+1 < len(s) {
+					i += 2
+					continue
+				}
+				if s[i] == quote {
+					i++
+					break
+				}
+				i++
+			}
+		case '[':
+			depth++
+			i++
+		case ']':
+			depth--
+			if depth == 0 {
+				return i, true
+			}
+			i++
+		default:
+			i++
+		}
+	}
+	return 0, false
 }
 
 // detectIndent picks up the leading whitespace of the FIRST non-empty line

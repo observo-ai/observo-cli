@@ -229,6 +229,77 @@ func TestPatchPlaywrightConfig_SpreadIdiom(t *testing.T) {
 	}
 }
 
+func TestPatchPlaywrightConfig_BracketInStringLiteral(t *testing.T) {
+	// Regression: lazy regex `[\s\S]*?\]` stopped at the FIRST `]` after
+	// the opening — for a config where an option value contains `]`
+	// (e.g. outputFolder with `[v2]` in the path), the patched output
+	// dropped everything after that inner `]`, producing invalid TS.
+	// Bracket-counting parser must skip `]` inside string literals.
+	dir := t.TempDir()
+	cfg := filepath.Join(dir, "playwright.config.ts")
+	original := `import { defineConfig } from '@playwright/test';
+export default defineConfig({
+  reporter: [
+    ['list'],
+    ['html', { outputFolder: 'reports[v2]', open: 'never' }],
+    ['junit', { outputFile: "out[snapshot].xml" }],
+  ],
+});
+`
+	if err := os.WriteFile(cfg, []byte(original), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	res, err := PatchPlaywrightConfig(cfg)
+	if err != nil {
+		t.Fatalf("patch: %v", err)
+	}
+	if !res.Changed {
+		t.Fatalf("expected change: %s", res.Reason)
+	}
+	// The patched content MUST still contain the html reporter line intact
+	// — if the lazy regex bug returns, the close `}` of the html entry gets
+	// dropped and this assertion catches it.
+	if !strings.Contains(res.NewContent, "outputFolder: 'reports[v2]', open: 'never'") {
+		t.Errorf("html reporter line truncated by bracket-counting bug:\n%s", res.NewContent)
+	}
+	if !strings.Contains(res.NewContent, "outputFile: \"out[snapshot].xml\"") {
+		t.Errorf("junit reporter line truncated:\n%s", res.NewContent)
+	}
+	// And the closing `]` of the outer reporter array must still be present
+	// in the post-patch text.
+	if !strings.Contains(res.NewContent, "],\n});") {
+		t.Errorf("outer array close `]` missing or moved:\n%s", res.NewContent)
+	}
+}
+
+func TestFindMatchingBracket(t *testing.T) {
+	cases := []struct {
+		name string
+		s    string
+		from int // index AFTER opening `[`
+		want int
+		ok   bool
+	}{
+		{"simple", "[abc]", 1, 4, true},
+		{"nested", "[a[b]c]", 1, 6, true},
+		{"deeply nested", "[[[]]]", 1, 5, true},
+		{"single-quoted bracket inside", "['x]y']", 1, 6, true},
+		{"double-quoted bracket inside", "[\"x]y\"]", 1, 6, true},
+		{"backtick bracket inside", "[`x]y`]", 1, 6, true},
+		{"escaped quote inside string", "['it\\'s]ok']", 1, 11, true},
+		{"unterminated", "[abc", 1, 0, false},
+		{"unterminated nested", "[a[b", 1, 0, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got, ok := findMatchingBracket(c.s, c.from)
+			if ok != c.ok || got != c.want {
+				t.Errorf("findMatchingBracket(%q, %d) = (%d, %v), want (%d, %v)", c.s, c.from, got, ok, c.want, c.ok)
+			}
+		})
+	}
+}
+
 func TestPatchPlaywrightConfig_HintHasNoDuplicateReporter(t *testing.T) {
 	// Single-string reporter form → we return a Reason with a manual snippet.
 	// Snippet must mention @observo/playwright-reporter exactly ONCE (earlier
