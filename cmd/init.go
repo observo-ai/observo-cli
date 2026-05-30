@@ -101,6 +101,11 @@ func initExec(cmd *cobra.Command, _ []string) error {
 			planKey = promptDefault(in, out, fmt.Sprintf("Plan key (in Observo dashboard)? [%s]", repo.DefaultPlan), repo.DefaultPlan)
 		}
 	}
+	// Normalize to uppercase before validation. Both prompted input and
+	// --plan flag arrive verbatim; ValidatePlanKey requires uppercase. Without
+	// this, a user shown `Plan key? [MY-APP-E2E]` who types `my-app-e2e` would
+	// get "invalid plan key" and have to restart the whole flow.
+	planKey = strings.ToUpper(planKey)
 	if err := initialize.ValidatePlanKey(planKey); err != nil {
 		return fmt.Errorf("invalid plan key: %w", err)
 	}
@@ -202,10 +207,11 @@ func initExec(cmd *cobra.Command, _ []string) error {
 		fmt.Fprintln(out, "  ✓ Installed @observo/playwright-reporter")
 	}
 	if !initFlagNoCommit {
-		// Build the path list from what we actually changed — hardcoding
-		// "playwright.config.ts" breaks for monorepos where the config lives
-		// in a subdirectory like web-portal/playwright.config.ts, because
-		// `git add <missing-path>` errors and was previously silently swallowed.
+		// Build path list from what we actually changed. Package files are
+		// added ONLY when at least one other change is happening — otherwise
+		// a re-run on an already-configured repo (config patched, workflow
+		// present) would commit unchanged package.json + lock and fail with
+		// "nothing to commit".
 		var addPaths []string
 		if patch.Changed {
 			addPaths = append(addPaths, pwCfg.ConfigPath)
@@ -213,7 +219,8 @@ func initExec(cmd *cobra.Command, _ []string) error {
 		if wfWillWrite {
 			addPaths = append(addPaths, relTo(cwd, wfDest))
 		}
-		if !initFlagNoInstall {
+		hasOtherChanges := len(addPaths) > 0
+		if !initFlagNoInstall && hasOtherChanges {
 			// package.json + lock live next to the playwright config (monorepo case).
 			pkgDir := filepath.Dir(pwCfg.ConfigPath)
 			addPaths = append(addPaths,
@@ -224,7 +231,7 @@ func initExec(cmd *cobra.Command, _ []string) error {
 		if len(addPaths) == 0 {
 			// Nothing changed — skip the git operations entirely so we don't
 			// switch the user's working branch as a side-effect of a no-op.
-			fmt.Fprintln(out, "  ⊘ Nothing to commit (config already had reporter + workflow exists + --no-install)")
+			fmt.Fprintln(out, "  ⊘ Nothing to commit (config already had reporter + workflow exists)")
 		} else {
 			if err := commitChanges(cmd, cwd, addPaths); err != nil {
 				return fmt.Errorf("commit: %w", err)
@@ -302,14 +309,11 @@ func resolveGitRoot(cwd string) (string, error) {
 }
 
 func commitChanges(cmd *cobra.Command, cwd string, addPaths []string) error {
-	// Branch checkout + commit are fatal; `git add` of an optional path
-	// (package-lock.json may not exist if npm install was skipped) is
-	// tolerated so a missing companion file doesn't abort the whole step.
-	if err := runGit(cmd, cwd, "checkout", "-B", "chore/observo-init"); err != nil {
-		return fmt.Errorf("git checkout: %w", err)
-	}
-	// Filter out missing paths so `git commit --only -- <paths>` doesn't
-	// abort on a non-existent file. We still log a warning for visibility.
+	// Filter missing paths FIRST so we never switch the user's branch
+	// (via `git checkout -B`) only to discover there's nothing to stage.
+	// Earlier order swapped: an empty `existing` after a missing-files
+	// pass left the user on chore/observo-init with the only feedback
+	// being a "no paths" error message.
 	var existing []string
 	for _, p := range addPaths {
 		abs := p
@@ -323,7 +327,10 @@ func commitChanges(cmd *cobra.Command, cwd string, addPaths []string) error {
 		existing = append(existing, p)
 	}
 	if len(existing) == 0 {
-		return fmt.Errorf("no paths to commit")
+		return fmt.Errorf("no paths to commit (all candidate files missing on disk)")
+	}
+	if err := runGit(cmd, cwd, "checkout", "-B", "chore/observo-init"); err != nil {
+		return fmt.Errorf("git checkout: %w", err)
 	}
 	// `git commit --only -- <paths>` commits ONLY the listed paths even if
 	// the user had other unrelated changes pre-staged (`git add` before

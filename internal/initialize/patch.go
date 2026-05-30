@@ -74,11 +74,13 @@ func PatchPlaywrightConfig(path string) (*PatchResult, error) {
 	}
 
 	// keyMatch[1] is index of the byte AFTER the opening `[`. Walk forward
-	// counting brackets to find the true close — handles nested arrays/objects
-	// and string literals containing `]`. If we can't find a matching close
-	// (truncated config / weird syntax), bail out cleanly.
+	// counting brackets on the COMMENT-MASKED text — a `]` inside a commented
+	// reporter entry (e.g. `// ['junit', { x: 'y' }],` line inside the array)
+	// would otherwise close the depth count early and produce a truncated
+	// patch. Offsets are identical between searchSpace and original because
+	// maskComments preserves byte lengths.
 	start := keyMatch[1]
-	end, ok := findMatchingBracket(original, start)
+	end, ok := findMatchingBracket(searchSpace, start)
 	if !ok {
 		return &PatchResult{
 			Path: path, Original: original, NewContent: original,
@@ -100,9 +102,13 @@ func PatchPlaywrightConfig(path string) (*PatchResult, error) {
 	// `reporter` in `newContent` (the insertion is after that index).
 	if !strings.Contains(newContent, reporterImportLine) {
 		repIdx := keyMatch[0]
-		// Walk back to the start of the line to insert above it.
+		// Walk back to the start of the line to insert above it. Reuse the
+		// EXACT leading whitespace from the existing reporter line (could be
+		// spaces, tabs, or mixed) instead of synthesizing spaces — tab-indented
+		// configs would otherwise get a space-indented marker and trip
+		// no-mixed-spaces-and-tabs lint rules.
 		lineStart := strings.LastIndex(newContent[:repIdx], "\n") + 1
-		marker := strings.Repeat(" ", repIdx-lineStart) + reporterImportLine + "\n"
+		marker := newContent[lineStart:repIdx] + reporterImportLine + "\n"
 		newContent = newContent[:lineStart] + marker + newContent[lineStart:]
 	}
 
@@ -157,15 +163,23 @@ func maskComments(s string) string {
 					out[j] = ' '
 				}
 			case '*':
-				// block comment — mask to `*/` (preserve newlines for line counting)
+				// block comment — mask to `*/` (preserve newlines for line counting).
+				// Unterminated block (EOF before */) masks through end of string,
+				// not just up to len(s)-1 — otherwise the final byte could be a
+				// reporter-array bracket the regex would still match.
 				start := i
 				i += 2
+				terminated := false
 				for i+1 < len(s) {
 					if s[i] == '*' && s[i+1] == '/' {
 						i += 2
+						terminated = true
 						break
 					}
 					i++
+				}
+				if !terminated {
+					i = len(s)
 				}
 				for j := start; j < i; j++ {
 					if out[j] != '\n' {

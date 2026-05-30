@@ -293,6 +293,97 @@ export default defineConfig({
 	}
 }
 
+func TestPatchPlaywrightConfig_CommentedBracketDoesNotTruncate(t *testing.T) {
+	// Regression: findMatchingBracket previously walked the raw `original`,
+	// so a commented-out reporter entry containing a `]` (e.g. the line
+	// below) closed the depth count early. The patch output then had a
+	// truncated reporter array and broke the surrounding code.
+	dir := t.TempDir()
+	cfg := filepath.Join(dir, "playwright.config.ts")
+	original := `export default defineConfig({
+  reporter: [
+    ['list'],
+    // ['junit', { outputFile: 'old.xml' }],
+    ['html', { open: 'never' }],
+  ],
+});
+`
+	if err := os.WriteFile(cfg, []byte(original), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	res, err := PatchPlaywrightConfig(cfg)
+	if err != nil {
+		t.Fatalf("patch: %v", err)
+	}
+	if !res.Changed {
+		t.Fatalf("expected change: %s", res.Reason)
+	}
+	// All three reporter entries must still appear after the patch — html line
+	// is what gets dropped if the comment-line `]` closes the array early.
+	for _, want := range []string{"['list'],", "['html', { open: 'never' }],", "// ['junit'"} {
+		if !strings.Contains(res.NewContent, want) {
+			t.Errorf("content missing %q (likely truncated by comment-bracket bug):\n%s", want, res.NewContent)
+		}
+	}
+	// Outer `]` of reporter array + closing `}` of defineConfig must still
+	// frame the right region — `}); ` close-up survives intact.
+	if !strings.Contains(res.NewContent, "],\n});") {
+		t.Errorf("outer reporter close + defineConfig close mangled:\n%s", res.NewContent)
+	}
+}
+
+func TestPatchPlaywrightConfig_TabIndentPreserved(t *testing.T) {
+	// Tab-indented config (Prettier `useTabs: true`) — the audit marker
+	// must reuse the same tab indentation, not synthesize spaces. Mixed
+	// indentation would trip ESLint `no-mixed-spaces-and-tabs` on the
+	// next lint-staged run.
+	dir := t.TempDir()
+	cfg := filepath.Join(dir, "playwright.config.ts")
+	original := "export default defineConfig({\n\treporter: [\n\t\t['list'],\n\t],\n});\n"
+	if err := os.WriteFile(cfg, []byte(original), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	res, err := PatchPlaywrightConfig(cfg)
+	if err != nil {
+		t.Fatalf("patch: %v", err)
+	}
+	if !res.Changed {
+		t.Fatalf("expected change")
+	}
+	// The marker line should begin with a TAB (same as the reporter: line),
+	// not a space. Search for the marker and confirm preceding indent.
+	mkIdx := strings.Index(res.NewContent, reporterImportLine)
+	if mkIdx < 0 {
+		t.Fatal("marker missing")
+	}
+	lineStart := strings.LastIndex(res.NewContent[:mkIdx], "\n") + 1
+	indent := res.NewContent[lineStart:mkIdx]
+	if !strings.HasPrefix(indent, "\t") {
+		t.Errorf("marker indent = %q, want tab-prefixed (matching reporter line)", indent)
+	}
+	if strings.Contains(indent, " ") {
+		t.Errorf("marker indent mixes spaces with tabs: %q", indent)
+	}
+}
+
+func TestMaskComments_UnterminatedBlock(t *testing.T) {
+	// Block comment that runs to EOF — the entire tail must be masked,
+	// including the very last byte (earlier off-by-one let the final byte
+	// slip through, which could be a `[` the regex would still match).
+	in := "code /* never closed [reporter:["
+	got := maskComments(in)
+	if len(got) != len(in) {
+		t.Fatalf("length changed: %d vs %d", len(got), len(in))
+	}
+	// Everything from the `/*` onward must be spaces.
+	tail := got[5:] // after "code "
+	for i, c := range tail {
+		if c != ' ' {
+			t.Errorf("unmasked byte at index %d in tail: %q (full tail: %q)", i, string(c), tail)
+		}
+	}
+}
+
 func TestWriteWorkflow_ErrorMentionsValidRecovery(t *testing.T) {
 	// The "file already exists" error must NOT reference --force (no such flag).
 	dir := t.TempDir()
