@@ -235,6 +235,86 @@ func TestRenderWorkflow(t *testing.T) {
 	}
 }
 
+func TestPatchPlaywrightConfig_IdempotencyIgnoresCommentedReference(t *testing.T) {
+	// Regression: idempotency check ran on raw text, so a developer who had
+	// previously tried the reporter and left the old config as a comment
+	// would block all future patches — Contains("@observo/playwright-reporter")
+	// returned true, "no patch needed" forever, real array never updated.
+	// Now we check against the comment-masked copy.
+	dir := t.TempDir()
+	cfg := filepath.Join(dir, "playwright.config.ts")
+	original := `// reporter: [['@observo/playwright-reporter']]  // tried previously, removed
+export default defineConfig({
+  reporter: [
+    ['list'],
+  ],
+});
+`
+	if err := os.WriteFile(cfg, []byte(original), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	res, err := PatchPlaywrightConfig(cfg)
+	if err != nil {
+		t.Fatalf("patch: %v", err)
+	}
+	if !res.Changed {
+		t.Fatalf("expected Changed=true (commented reference must not block); got Reason: %s", res.Reason)
+	}
+	// Real array got the spread idiom in the live defineConfig block.
+	idx := strings.Index(res.NewContent, "defineConfig")
+	if !strings.Contains(res.NewContent[idx:], "...(process.env.CI") {
+		t.Errorf("real reporter array not patched:\n%s", res.NewContent)
+	}
+}
+
+func TestPatchPlaywrightConfig_SingleLineArrayIndentFallback(t *testing.T) {
+	// Regression: detectIndent returned a bare "\n" for single-line reporter
+	// arrays (no internal newlines). The inserted entry ended up at column 0
+	// with no trailing newline, visually breaking surrounding indentation
+	// and tripping formatters/linters. Now uses the reporter-key line's own
+	// indent + 2-space offset as fallback.
+	dir := t.TempDir()
+	cfg := filepath.Join(dir, "playwright.config.ts")
+	original := "export default defineConfig({\n  reporter: [['list'], ['html']],\n});\n"
+	if err := os.WriteFile(cfg, []byte(original), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	res, err := PatchPlaywrightConfig(cfg)
+	if err != nil {
+		t.Fatalf("patch: %v", err)
+	}
+	if !res.Changed {
+		t.Fatal("expected Changed")
+	}
+	// Inserted line must have at least the reporter-line's indent.
+	idx := strings.Index(res.NewContent, "...(process.env.CI")
+	if idx < 0 {
+		t.Fatal("spread missing")
+	}
+	lineStart := strings.LastIndex(res.NewContent[:idx], "\n") + 1
+	indent := res.NewContent[lineStart:idx]
+	if len(indent) == 0 {
+		t.Errorf("spread entry placed at column 0 (no leading whitespace) in:\n%s", res.NewContent)
+	}
+}
+
+func TestValidatePlanKey_RejectsTrailingDashUnderscore(t *testing.T) {
+	bad := []string{"PLAN-", "MY-APP_", "X_", "Y-"}
+	for _, k := range bad {
+		if err := ValidatePlanKey(k); err == nil {
+			t.Errorf("ValidatePlanKey(%q) = nil, want error (trailing dash/underscore)", k)
+		}
+	}
+	// Single-char keys still pass — guard against the regex update breaking the
+	// optional middle/last group.
+	good := []string{"X", "0", "A"}
+	for _, k := range good {
+		if err := ValidatePlanKey(k); err != nil {
+			t.Errorf("ValidatePlanKey(%q) = %v, want nil (single-char)", k, err)
+		}
+	}
+}
+
 func TestPatchPlaywrightConfig_CommentedOutReporterIgnored(t *testing.T) {
 	// Regression: previously the regex matched the FIRST `reporter:` token in
 	// the file, including inside `// ...` comments. The comment-out version

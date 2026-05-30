@@ -49,20 +49,21 @@ func PatchPlaywrightConfig(path string) (*PatchResult, error) {
 	}
 	original := string(raw)
 
-	if strings.Contains(original, "@observo/playwright-reporter") {
+	// Mask comments BEFORE the idempotency check too — a developer who left
+	// a previous trial of the reporter commented out (`// reporter: [['@observo/playwright-reporter']]`)
+	// would otherwise make the raw-text Contains check return true, refuse
+	// to patch, and print "no patch needed" forever even though the real
+	// array still lacks the entry.
+	searchSpace := maskComments(original)
+	if strings.Contains(searchSpace, "@observo/playwright-reporter") {
 		return &PatchResult{
 			Path: path, Original: original, NewContent: original,
-			Changed: false, Reason: "@observo/playwright-reporter already referenced",
+			Changed: false, Reason: "@observo/playwright-reporter already referenced (non-comment)",
 		}, nil
 	}
 
-	// Search for the reporter key in a copy with comments masked out (spaces
-	// preserve byte offsets), so a commented-out `// reporter: ['list']` or
-	// `/* reporter: [...] */` block can't hijack the match. Without this
-	// guard the regex finds the first textual occurrence; we'd insert into
-	// the comment body, idempotency would then see @observo/playwright-reporter
-	// in the comment on the next run, and the real array would never be patched.
-	searchSpace := maskComments(original)
+	// Search for the reporter key in the same comment-masked copy so a
+	// commented-out `// reporter: ['list']` block can't hijack the match.
 	keyMatch := reporterKeyRegex.FindStringIndex(searchSpace)
 	if keyMatch == nil {
 		return &PatchResult{
@@ -90,7 +91,21 @@ func PatchPlaywrightConfig(path string) (*PatchResult, error) {
 	}
 	inside := original[start:end]
 	indent := detectIndent(inside)
-	patched := indent + observoReporterEntry + inside
+	// Empty (no content lines) or bare-newline (first line had no leading
+	// whitespace) → fall back to the reporter-key line's own indent + 2-space
+	// offset so the inserted entry sits visually inside the array.
+	if indent == "" || indent == "\n" {
+		indent = "\n" + indentOfLineContaining(original, keyMatch[0]) + "  "
+	}
+	// Inserting a new line with a spread entry; for single-line original
+	// arrays we also need to push the existing inline content onto a new
+	// line by appending a trailing newline before the original `inside`.
+	// Detect single-line: `inside` has no `\n`.
+	separator := ""
+	if !strings.Contains(inside, "\n") {
+		separator = indent
+	}
+	patched := indent + observoReporterEntry + separator + strings.TrimLeft(inside, " \t")
 	newContent := original[:start] + patched + original[end:]
 
 	// Add a marker comment immediately above the reporters line for human
@@ -246,16 +261,37 @@ func findMatchingBracket(s string, from int) (int, bool) {
 // detectIndent picks up the leading whitespace of the FIRST non-empty line
 // inside the reporter array so we add the new entry with matching indent.
 // Best-effort; defaults to 4 spaces if we can't see one.
+//
+// Single-line reporter arrays (e.g. `reporter: [['list'], ['html']]` on one
+// line) have no internal newline → `inside` is content-only with no
+// indentation cues. Returning a bare `\n` would put the spread entry at
+// column 0 with no newline before the closing `]`, visually breaking the
+// surrounding indentation. The caller (PatchPlaywrightConfig) handles this
+// by passing the reporter-key line's own indent as `outerIndent` for the
+// fallback. detectIndentFallback below applies it.
 func detectIndent(inside string) string {
-	// Lines from strings.Split never contain `\n`, so we always prefix the
-	// returned indent with a newline ourselves.
 	for _, ln := range strings.Split(inside, "\n") {
 		trim := strings.TrimLeft(ln, " \t")
 		if trim != "" {
 			return "\n" + ln[:len(ln)-len(trim)]
 		}
 	}
-	return "\n    "
+	return "" // empty = caller should use outer-line indent + 2-space offset
+}
+
+// indentOfLineContaining returns the leading whitespace of the line that
+// contains `offset` in `s`. Used as fallback for detectIndent when the
+// reporter array is single-line.
+func indentOfLineContaining(s string, offset int) string {
+	if offset < 0 || offset > len(s) {
+		return ""
+	}
+	lineStart := strings.LastIndex(s[:offset], "\n") + 1
+	indent := ""
+	for i := lineStart; i < len(s) && (s[i] == ' ' || s[i] == '\t'); i++ {
+		indent += string(s[i])
+	}
+	return indent
 }
 
 // WritePatch persists a PatchResult.NewContent atomically (write to tmp,

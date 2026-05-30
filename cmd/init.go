@@ -201,17 +201,16 @@ func initExec(cmd *cobra.Command, _ []string) error {
 		fmt.Fprintf(out, "  ✓ Wrote %s\n", relTo(cwd, wfDest))
 	}
 	if !initFlagNoInstall {
-		// npm install runs in the directory that owns playwright.config.ts,
-		// not in process cwd. Monorepo with web-portal/playwright.config.ts
-		// has its own web-portal/package.json — installing at repo root
-		// would silently drop the dep into the wrong package.json (or fail
-		// if no root package.json exists). filepath.Dir handles the
-		// repo-root case too (Dir("playwright.config.ts") == ".").
+		// Install runs in the directory that owns playwright.config.ts.
+		// Detect the package manager from the existing lock file so we don't
+		// drop a stray package-lock.json into a pnpm/yarn repo and contaminate
+		// the lock-file convention.
 		pwDir := filepath.Join(cwd, filepath.Dir(pwCfg.ConfigPath))
-		if err := runShellIn(cmd, pwDir, "npm", "install", "-D", "@observo/playwright-reporter"); err != nil {
-			return fmt.Errorf("npm install: %w", err)
+		pm := detectPackageManager(pwDir)
+		if err := runShellIn(cmd, pwDir, pm.install, pm.installArgs...); err != nil {
+			return fmt.Errorf("%s install: %w", pm.install, err)
 		}
-		fmt.Fprintln(out, "  ✓ Installed @observo/playwright-reporter")
+		fmt.Fprintf(out, "  ✓ Installed @observo/playwright-reporter via %s\n", pm.install)
 	}
 	if !initFlagNoCommit {
 		// Build path list from what we actually changed. Package files are
@@ -229,10 +228,13 @@ func initExec(cmd *cobra.Command, _ []string) error {
 		hasOtherChanges := len(addPaths) > 0
 		if !initFlagNoInstall && hasOtherChanges {
 			// package.json + lock live next to the playwright config (monorepo case).
+			// Use the lock file name for the detected package manager so we
+			// stage the right file (pnpm-lock.yaml / yarn.lock / package-lock.json).
 			pkgDir := filepath.Dir(pwCfg.ConfigPath)
+			pm := detectPackageManager(filepath.Join(cwd, pkgDir))
 			addPaths = append(addPaths,
 				filepath.Join(pkgDir, "package.json"),
-				filepath.Join(pkgDir, "package-lock.json"),
+				filepath.Join(pkgDir, pm.lockFile),
 			)
 		}
 		if len(addPaths) == 0 {
@@ -359,11 +361,19 @@ func commitChanges(cmd *cobra.Command, cwd string, addPaths []string) error {
 		// Roll back the branch switch so the user is back where they were
 		// before init started. Working-tree changes (the patch + workflow)
 		// stay — they're recoverable with `git stash` / `git diff`.
+		// Also DELETE the just-created chore/observo-init branch so a retry
+		// isn't blocked by the branchExists() guard above. The branch is
+		// guaranteed empty of observo-init work because the commit failed.
 		if prevBranch != "" {
 			if rerr := runGit(cmd, cwd, "checkout", prevBranch); rerr != nil {
 				fmt.Fprintf(cmd.ErrOrStderr(), "  ⚠ commit failed AND could not restore %s: %v\n", prevBranch, rerr)
 			} else {
-				fmt.Fprintf(cmd.ErrOrStderr(), "  ⓘ commit failed — restored you to %s; working-tree changes preserved\n", prevBranch)
+				// Restored — now safe to delete the zombie branch.
+				if derr := runGit(cmd, cwd, "branch", "-D", "chore/observo-init"); derr != nil {
+					fmt.Fprintf(cmd.ErrOrStderr(), "  ⚠ commit failed; restored you to %s but could not delete zombie chore/observo-init: %v\n", prevBranch, derr)
+				} else {
+					fmt.Fprintf(cmd.ErrOrStderr(), "  ⓘ commit failed — restored you to %s, cleaned up empty chore/observo-init; working-tree changes preserved\n", prevBranch)
+				}
 			}
 		}
 		return fmt.Errorf("git commit: %w", err)
@@ -391,6 +401,34 @@ func currentBranch(cmd *cobra.Command, cwd string) string {
 func branchExists(cwd, name string) bool {
 	err := exec.Command("git", "-C", cwd, "rev-parse", "--verify", "--quiet", "refs/heads/"+name).Run()
 	return err == nil
+}
+
+// packageManager bundles the install command + lock file name for a JS
+// package manager. Detected per-project via detectPackageManager.
+type packageManager struct {
+	install     string
+	installArgs []string
+	lockFile    string
+}
+
+// detectPackageManager picks the package manager based on which lock file
+// already exists in pkgDir. Defaults to npm if none found (matches the
+// observo-cli npm publish target and most generic Playwright tutorials).
+func detectPackageManager(pkgDir string) packageManager {
+	if fileExistsAbs(filepath.Join(pkgDir, "pnpm-lock.yaml")) {
+		return packageManager{install: "pnpm", installArgs: []string{"add", "-D", "@observo/playwright-reporter"}, lockFile: "pnpm-lock.yaml"}
+	}
+	if fileExistsAbs(filepath.Join(pkgDir, "yarn.lock")) {
+		return packageManager{install: "yarn", installArgs: []string{"add", "--dev", "@observo/playwright-reporter"}, lockFile: "yarn.lock"}
+	}
+	return packageManager{install: "npm", installArgs: []string{"install", "-D", "@observo/playwright-reporter"}, lockFile: "package-lock.json"}
+}
+
+// fileExistsAbs returns true if abs is a regular file. Local helper to avoid
+// importing internal/initialize just for FileExists.
+func fileExistsAbs(abs string) bool {
+	st, err := os.Stat(abs)
+	return err == nil && !st.IsDir()
 }
 
 func runGit(cmd *cobra.Command, cwd string, args ...string) error {

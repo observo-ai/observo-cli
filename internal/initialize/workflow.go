@@ -13,7 +13,12 @@ import (
 // risks: YAML parse errors (`: `, leading `*` / `&`), shell glob expansion
 // in CI invocations, or backend rejection at create_plan. Caller (cmd/init.go)
 // validates the --plan flag against this BEFORE rendering the workflow.
-var validPlanKey = regexp.MustCompile(`^[A-Z0-9][A-Z0-9_-]*$`)
+//
+// First AND last char must be [A-Z0-9] — trailing `-` or `_` are likely to
+// be backend-rejected at create_plan and would never come out of
+// derivePlanName (which Trims them). Middle chars allow `-` and `_`.
+// Single-char `[A-Z0-9]` keys are accepted via the optional group.
+var validPlanKey = regexp.MustCompile(`^[A-Z0-9]([A-Z0-9_-]*[A-Z0-9])?$`)
 
 // ValidatePlanKey returns nil if key is safe to embed in a YAML scalar
 // unquoted. Used for the --plan flag override; auto-derived keys are
