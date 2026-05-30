@@ -106,14 +106,29 @@ func initExec(cmd *cobra.Command, _ []string) error {
 	}
 	fmt.Fprintf(out, "✓ Plan key: %s\n", planKey)
 
-	// 4) Detect existing Playwright workflow + warn the customer.
-	if existing, _ := initialize.DetectExistingPlaywrightWorkflow(cwd); existing != "" {
+	// 4) Resolve the git root — the workflow file MUST land under the repo's
+	//    top-level .github/workflows/ to be picked up by GitHub Actions.
+	//    `cwd` may be a subdirectory (e.g. user runs `observo init` from
+	//    monorepos/frontend/) in which case `cwd/.github/workflows/` is the
+	//    wrong place.
+	gitRoot, err := resolveGitRoot(cwd)
+	if err != nil {
+		return fmt.Errorf("resolve git root: %w", err)
+	}
+
+	// 5) Detect existing Playwright workflow under the actual git root + warn.
+	//    Capture I/O errors instead of swallowing — permissions / fs errors
+	//    on .github/workflows/ should surface, not vanish the dup-warning.
+	existing, dwErr := initialize.DetectExistingPlaywrightWorkflow(gitRoot)
+	if dwErr != nil {
+		fmt.Fprintf(cmd.ErrOrStderr(), "⚠ Could not scan %s/.github/workflows/ for existing Playwright workflows: %v (proceeding without dup-warning)\n", gitRoot, dwErr)
+	} else if existing != "" {
 		fmt.Fprintf(out, "ⓘ Note: %s already runs Playwright. 'observo init' will create a SECOND workflow.\n"+
-			"  Consider patching the existing one instead — see https://observo.ai/docs/connect-github-actions\n",
+			"  Consider patching the existing one instead — see https://observoai.co/docs/connect-github-actions\n",
 			existing)
 	}
 
-	// 5) Plan the patch to playwright.config.ts.
+	// 6) Plan the patch to playwright.config.ts.
 	patch, err := initialize.PatchPlaywrightConfig(filepath.Join(cwd, pwCfg.ConfigPath))
 	if err != nil {
 		return fmt.Errorf("read playwright config: %w", err)
@@ -124,8 +139,8 @@ func initExec(cmd *cobra.Command, _ []string) error {
 		fmt.Fprintf(out, "ⓘ %s — no patch needed: %s\n", pwCfg.ConfigPath, patch.Reason)
 	}
 
-	// 6) Plan the workflow file.
-	wfDest := initialize.WorkflowFileTarget(cwd)
+	// 7) Plan the workflow file — anchored at git root, NOT process cwd.
+	wfDest := initialize.WorkflowFileTarget(gitRoot)
 	wfBody := initialize.RenderWorkflow(initialize.WorkflowSpec{PlanKey: planKey})
 	wfWillWrite := !initialize.FileExists(wfDest)
 	if wfWillWrite {
@@ -260,13 +275,10 @@ func promptYesNo(in io.Reader, out io.Writer, prompt string, defaultYes bool) bo
 
 // --- side-effects -----------------------------------------------------------
 
-func runShell(cmd *cobra.Command, name string, args ...string) error {
-	return runShellIn(cmd, "", name, args...)
-}
-
-// runShellIn is the explicit-cwd variant. Used for npm install which must
-// target the package.json directory (the playwright project root, which in
-// monorepos is NOT process cwd).
+// runShellIn runs a shell command with explicit cwd. Used for npm install
+// which must target the package.json directory (the playwright project
+// root, which in monorepos is NOT process cwd). Pass "" for `dir` to inherit
+// process cwd.
 func runShellIn(cmd *cobra.Command, dir string, name string, args ...string) error {
 	c := exec.Command(name, args...)
 	if dir != "" {
@@ -275,6 +287,18 @@ func runShellIn(cmd *cobra.Command, dir string, name string, args ...string) err
 	c.Stdout = cmd.OutOrStdout()
 	c.Stderr = cmd.ErrOrStderr()
 	return c.Run()
+}
+
+// resolveGitRoot returns the absolute path of the git working-tree root by
+// running `git -C cwd rev-parse --show-toplevel`. Returns an error if cwd
+// is not inside a git checkout — caller already requires the repo, so this
+// is a sanity confirmation rather than a hot path.
+func resolveGitRoot(cwd string) (string, error) {
+	out, err := exec.Command("git", "-C", cwd, "rev-parse", "--show-toplevel").Output()
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(out)), nil
 }
 
 func commitChanges(cmd *cobra.Command, cwd string, addPaths []string) error {

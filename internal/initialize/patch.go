@@ -156,15 +156,12 @@ func findMatchingBracket(s string, from int) (int, bool) {
 // inside the reporter array so we add the new entry with matching indent.
 // Best-effort; defaults to 4 spaces if we can't see one.
 func detectIndent(inside string) string {
-	lines := strings.Split(inside, "\n")
-	for _, ln := range lines {
+	// Lines from strings.Split never contain `\n`, so we always prefix the
+	// returned indent with a newline ourselves.
+	for _, ln := range strings.Split(inside, "\n") {
 		trim := strings.TrimLeft(ln, " \t")
 		if trim != "" {
-			indent := ln[:len(ln)-len(trim)]
-			if !strings.HasSuffix(indent, "\n") {
-				return "\n" + indent
-			}
-			return indent
+			return "\n" + ln[:len(ln)-len(trim)]
 		}
 	}
 	return "\n    "
@@ -172,12 +169,19 @@ func detectIndent(inside string) string {
 
 // WritePatch persists a PatchResult.NewContent atomically (write to tmp,
 // rename over original) so a failed write doesn't corrupt the user's config.
+// Preserves the original file's mode bits — a script-like config (e.g.
+// chmod +x because someone runs the file directly) keeps its perms.
 func WritePatch(p *PatchResult) error {
 	if !p.Changed {
 		return nil
 	}
+	// Read original mode before overwrite so atomic rename doesn't strip it.
+	mode := os.FileMode(0o644)
+	if info, err := os.Stat(p.Path); err == nil {
+		mode = info.Mode().Perm()
+	}
 	tmp := p.Path + ".observo-tmp"
-	if err := os.WriteFile(tmp, []byte(p.NewContent), 0o644); err != nil {
+	if err := os.WriteFile(tmp, []byte(p.NewContent), mode); err != nil {
 		return err
 	}
 	if err := os.Rename(tmp, p.Path); err != nil {

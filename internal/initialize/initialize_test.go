@@ -167,10 +167,46 @@ func TestRenderWorkflow(t *testing.T) {
 	// plan: '...' (quoted) — single-quote wrapping guards against YAML scalar
 	// ambiguity for any plan_key, even though derivePlanName sanitizes the
 	// auto-derived form.
-	for _, want := range []string{"observo-ai/setup@v1", "plan: 'MY-PLAN-E2E'", "id-token: write", "node-version: '20'"} {
+	for _, want := range []string{
+		"observo-ai/setup@v1",
+		"plan: 'MY-PLAN-E2E'",
+		"id-token: write",
+		"node-version: '20'",
+		// finalize step must fail loud, not silently:
+		// - `-f` makes curl exit non-zero on HTTP errors
+		// - explicit env-var guard before the call
+		// - `|| exit 1` so a 401/5xx isn't swallowed
+		"curl -fsS",
+		`if [ -z "$OBSERVO_RUN_KEY" ]`,
+		"|| exit 1",
+	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("workflow missing %q in:\n%s", want, out)
 		}
+	}
+}
+
+func TestWritePatch_PreservesMode(t *testing.T) {
+	dir := t.TempDir()
+	cfg := filepath.Join(dir, "playwright.config.ts")
+	original := `export default defineConfig({ reporter: [['list']] });`
+	if err := os.WriteFile(cfg, []byte(original), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	res, err := PatchPlaywrightConfig(cfg)
+	if err != nil {
+		t.Fatalf("patch: %v", err)
+	}
+	if err := WritePatch(res); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	info, err := os.Stat(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := info.Mode().Perm()
+	if got != 0o755 {
+		t.Errorf("mode = %o, want 0755 (original mode must survive atomic rename)", got)
 	}
 }
 

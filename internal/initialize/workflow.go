@@ -87,14 +87,23 @@ jobs:
       - run: npx playwright install --with-deps
       - run: npx playwright test
 
+      # observo-ai/setup@v1 writes OBSERVO_TOKEN + OBSERVO_RUN_KEY to
+      # $GITHUB_ENV, so they are visible to every subsequent step in this
+      # job as ordinary env vars. -f makes curl exit non-zero on HTTP
+      # errors and || exit 1 ensures finalization failure surfaces in the
+      # job result instead of being silently swallowed.
       - name: Finalize Observo run
         if: always()
         run: |
-          curl -sS -X POST \
+          if [ -z "$OBSERVO_RUN_KEY" ] || [ -z "$OBSERVO_TOKEN" ]; then
+            echo "::error::Observo env vars missing — setup-action probably failed earlier"
+            exit 1
+          fi
+          curl -fsS -X POST \
             -H "Authorization: Bearer $OBSERVO_TOKEN" \
             -H "Content-Type: application/json" \
             -d '{"status":"auto"}' \
-            "https://api.observoai.co/api/runs/$OBSERVO_RUN_KEY:finish"
+            "https://api.observoai.co/api/runs/$OBSERVO_RUN_KEY:finish" || exit 1
 `, name, node, spec.PlanKey)
 }
 
