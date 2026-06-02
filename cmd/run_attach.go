@@ -17,15 +17,23 @@ var (
 	raProject   string
 	raRunID     string
 	raFile      string
+	raCase      string
+	raCaseCode  string
 	raStateFile string
 )
 
 var runAttachCmd = &cobra.Command{
 	Use:   "attach",
-	Short: "Upload an artifact (junit, lcov, html, etc.) and link it to the run",
-	Long: `Upload a local file to Observo as a run-scoped attachment. The server
-returns an attachment ID — useful when you want to splice it into
+	Short: "Upload an artifact (junit, lcov, html, etc.) and link it to the run or a run-case",
+	Long: `Upload a local file to Observo as an attachment. The server returns an
+attachment ID — useful when you want to splice it into
 'observo run pipeline-layer set --junit-attachment-id ...' yourself.
+
+By default the attachment is run-scoped. Pass --case (alias --code) with
+a run-case short code to link it to a SPECIFIC case in the run instead —
+e.g. a trace.zip / error-context.md for a failing E2E case (OB-397). The
+case must already be attached to the run (--run-id resolves the per-case
+row); otherwise the server returns 404.
 
 Most CI flows should NOT call this directly — 'run pipeline-layer set'
 runs the same upload internally and splices the IDs into the layer
@@ -43,6 +51,8 @@ func init() {
 	f.StringVar(&raProject, "project", "", "project UUID or short code (default: from state file)")
 	f.StringVar(&raRunID, "run-id", "", "run UUID (default: from state file)")
 	f.StringVar(&raFile, "file", "", "local file path to upload (required)")
+	f.StringVar(&raCase, "case", "", "run-case short code (e.g. OB-76) to link the attachment to; needs --run-id/state. Omit for a run-level attachment")
+	f.StringVar(&raCaseCode, "code", "", "alias for --case (parity with 'run case set --code')")
 	f.StringVar(&raStateFile, "state-file", state.DefaultPath, "where to read run_id from")
 	_ = runAttachCmd.MarkFlagRequired("file")
 }
@@ -51,6 +61,16 @@ func runAttachExec(cmd *cobra.Command, _ []string) error {
 	cfg := config.Resolve(flagAPIKey, flagBaseURL, flagJSON, flagVerbose)
 	if err := cfg.Validate(); err != nil {
 		return err
+	}
+
+	// --case is canonical; --code is an alias (parity with 'run case set').
+	// Reconcile: prefer --case, fall back to --code, error if both differ.
+	caseRef := raCase
+	switch {
+	case raCase != "" && raCaseCode != "" && raCase != raCaseCode:
+		return fmt.Errorf("--case (%q) and --code (%q) both set and differ; pass only one", raCase, raCaseCode)
+	case caseRef == "":
+		caseRef = raCaseCode
 	}
 
 	projectID, runID, err := resolveProjectAndRun(raProject, raRunID, raStateFile)
@@ -74,6 +94,7 @@ func runAttachExec(cmd *cobra.Command, _ []string) error {
 	att, err := client.UploadAttachment(context.Background(), api.UploadAttachmentRequest{
 		ProjectID: projectID,
 		RunID:     runID,
+		RunCaseID: caseRef, // empty → run-scoped; short code → server resolves the per-case row via run_id
 		FilePath:  raFile,
 	})
 	if err != nil {
@@ -82,11 +103,15 @@ func runAttachExec(cmd *cobra.Command, _ []string) error {
 
 	p := output.New(cfg.JSON)
 	p.Out = cmd.OutOrStdout()
-	return p.Result(map[string]any{
+	res := map[string]any{
 		"attachment_id": att.ID,
 		"file_name":     att.FileName,
 		"run_id":        runID,
-	}, att.ID)
+	}
+	if caseRef != "" {
+		res["case"] = caseRef
+	}
+	return p.Result(res, att.ID)
 }
 
 // resolveProjectAndRun is the shared "flag → state file" lookup for any
