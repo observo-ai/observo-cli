@@ -284,7 +284,7 @@ func runImportExec(cmd *cobra.Command, args []string) error {
 		case riDryRun:
 			fmt.Fprintf(stderr, "would PATCH %s status=%s\n", code, status)
 		default:
-			if err := client.EnsureAndUpdateRunCase(ctx, runID, code, status); err != nil {
+			if err := client.EnsureAndUpdateRunCase(ctx, runID, code, status, ""); err != nil {
 				fmt.Fprintf(stderr, "%s: PATCH case status: %v\n", code, err)
 				// Continue to attachments anyway — server may have the
 				// case already attached and reject is on something else.

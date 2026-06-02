@@ -48,10 +48,25 @@ func (c *Client) BatchAddCases(ctx context.Context, runID string, shortCodes []s
 	return c.DoJSON(ctx, "POST", path, body, nil)
 }
 
-// UpdateRunCase PATCHes a single run-case status by short code.
-// On 404 (case not attached to run), caller should batch_add then retry
-// — the wrapper `EnsureAndUpdateRunCase` below does that automatically.
-func (c *Client) UpdateRunCase(ctx context.Context, runID, shortCode, status string) error {
+// updateRunCaseBody is the PATCH body for /api/runs/{run_id}/cases/{short_code}.
+// Mirrors the server's UpdateTestCaseInRunRequest: status (proto field 4) plus
+// an optional comment (field 5, google.protobuf.StringValue → presence
+// semantics). `comment` is omitted when empty so a status-only PATCH never
+// clobbers an existing note: a missing field maps to a nil StringValue, which
+// the handler treats as "no change".
+type updateRunCaseBody struct {
+	Status  string `json:"status"`
+	Comment string `json:"comment,omitempty"`
+}
+
+// UpdateRunCase PATCHes a single run-case status (and optional comment) by
+// short code. On 404 (case not attached to run), caller should batch_add then
+// retry — the wrapper `EnsureAndUpdateRunCase` below does that automatically.
+//
+// comment is a free-form case-level note surfaced in the dashboard (OB-397) —
+// e.g. a reporter writing the top-level failure reason when a test dies with no
+// per-step error to attach. Empty comment is omitted (preserves any existing).
+func (c *Client) UpdateRunCase(ctx context.Context, runID, shortCode, status, comment string) error {
 	if runID == "" || shortCode == "" {
 		return errors.New("UpdateRunCase: run_id and short_code required")
 	}
@@ -59,8 +74,7 @@ func (c *Client) UpdateRunCase(ctx context.Context, runID, shortCode, status str
 		return fmt.Errorf("UpdateRunCase: invalid status %q (allowed: passed, failed, skipped, blocked)", status)
 	}
 	path := "/api/runs/" + url.PathEscape(runID) + "/cases/" + url.PathEscape(shortCode)
-	body := map[string]string{"status": status}
-	return c.DoJSON(ctx, "PATCH", path, body, nil)
+	return c.DoJSON(ctx, "PATCH", path, updateRunCaseBody{Status: status, Comment: comment}, nil)
 }
 
 // EnsureAndUpdateRunCase PATCHes a run-case status by short code.
@@ -82,8 +96,8 @@ func (c *Client) UpdateRunCase(ctx context.Context, runID, shortCode, status str
 // (API-key path) + accept short codes. Until that lands, callers must
 // pre-attach cases via the dashboard, MCP, or a run create with a plan
 // that includes them.
-func (c *Client) EnsureAndUpdateRunCase(ctx context.Context, runID, shortCode, status string) error {
-	err := c.UpdateRunCase(ctx, runID, shortCode, status)
+func (c *Client) EnsureAndUpdateRunCase(ctx context.Context, runID, shortCode, status, comment string) error {
+	err := c.UpdateRunCase(ctx, runID, shortCode, status, comment)
 	var herr *HTTPError
 	if errors.As(err, &herr) && herr.StatusCode == 404 {
 		return fmt.Errorf("case %s not attached to run %s — pre-attach via dashboard/MCP/plan first (CLI batch_add deferred until server-side fix): %w",
@@ -101,8 +115,8 @@ type UpdateRunCaseStepRequest struct {
 	ShortCode string `json:"-"`
 	StepIndex int    `json:"-"`
 
-	Status  string `json:"status"`            // passed|failed|skipped|blocked
-	Comment string `json:"comment,omitempty"` // free-form text, shown in dashboard
+	Status  string `json:"status"`             // passed|failed|skipped|blocked
+	Comment string `json:"comment,omitempty"`  // free-form text, shown in dashboard
 	FileURL string `json:"file_url,omitempty"` // attachment URL to surface inline
 }
 

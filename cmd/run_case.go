@@ -21,11 +21,12 @@ var runCaseCmd = &cobra.Command{
 
 // runCaseSetCmd: PATCH /api/runs/{run_id}/cases/{short_code} with status.
 var (
-	rcsProject    string
-	rcsRunID      string
-	rcsCode       string
-	rcsStatus     string
-	rcsStateFile  string
+	rcsProject   string
+	rcsRunID     string
+	rcsCode      string
+	rcsStatus    string
+	rcsComment   string
+	rcsStateFile string
 )
 
 var runCaseSetCmd = &cobra.Command{
@@ -59,6 +60,7 @@ func init() {
 	f.StringVar(&rcsRunID, "run-id", "", "run UUID (default: from state file)")
 	f.StringVar(&rcsCode, "code", "", "test case short code, e.g. OB-50 (required)")
 	f.StringVar(&rcsStatus, "status", "", "passed | failed | skipped | blocked (required)")
+	f.StringVar(&rcsComment, "comment", "", "free-form case-level note shown in the dashboard (e.g. the failure reason); omit to preserve any existing comment")
 	f.StringVar(&rcsStateFile, "state-file", state.DefaultPath, "where to read run_id from")
 	_ = runCaseSetCmd.MarkFlagRequired("code")
 	_ = runCaseSetCmd.MarkFlagRequired("status")
@@ -87,17 +89,21 @@ func runCaseSetExec(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
-	if err := client.EnsureAndUpdateRunCase(context.Background(), runID, rcsCode, rcsStatus); err != nil {
+	if err := client.EnsureAndUpdateRunCase(context.Background(), runID, rcsCode, rcsStatus, rcsComment); err != nil {
 		return fmt.Errorf("update run-case: %w", err)
 	}
 
 	p := output.New(cfg.JSON)
 	p.Out = cmd.OutOrStdout()
-	return p.Result(map[string]any{
+	res := map[string]any{
 		"run_id": runID,
 		"code":   rcsCode,
 		"status": rcsStatus,
-	}, fmt.Sprintf("case %s: %s", rcsCode, rcsStatus))
+	}
+	if rcsComment != "" {
+		res["comment"] = rcsComment
+	}
+	return p.Result(res, fmt.Sprintf("case %s: %s", rcsCode, rcsStatus))
 }
 
 // `run case step set` — separate sub-tree because it's a different

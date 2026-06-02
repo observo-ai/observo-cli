@@ -56,7 +56,7 @@ func TestUpdateRunCase_PatchesStatus(t *testing.T) {
 	defer srv.Close()
 
 	c, _ := New(Options{BaseURL: srv.URL, APIKey: "k", Timeout: 2 * time.Second})
-	if err := c.UpdateRunCase(context.Background(), "r1", "OB-50", "failed"); err != nil {
+	if err := c.UpdateRunCase(context.Background(), "r1", "OB-50", "failed", ""); err != nil {
 		t.Fatalf("UpdateRunCase: %v", err)
 	}
 	if gotMethod != "PATCH" || gotPath != "/api/runs/r1/cases/OB-50" {
@@ -65,12 +65,38 @@ func TestUpdateRunCase_PatchesStatus(t *testing.T) {
 	if !strings.Contains(gotBody, `"status":"failed"`) {
 		t.Errorf("body: %s", gotBody)
 	}
+	// OB-397: an empty comment must be OMITTED from the body, so a
+	// status-only PATCH never clobbers an existing note (StringValue nil).
+	if strings.Contains(gotBody, "comment") {
+		t.Errorf("empty comment must be omitted from body; got: %s", gotBody)
+	}
+}
+
+func TestUpdateRunCase_IncludesCommentWhenSet(t *testing.T) {
+	var gotBody string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		gotBody = string(b)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	c, _ := New(Options{BaseURL: srv.URL, APIKey: "k", Timeout: 2 * time.Second})
+	if err := c.UpdateRunCase(context.Background(), "r1", "OB-50", "failed", "browserType.launch: webkit missing"); err != nil {
+		t.Fatalf("UpdateRunCase: %v", err)
+	}
+	if !strings.Contains(gotBody, `"status":"failed"`) {
+		t.Errorf("status missing from body: %s", gotBody)
+	}
+	if !strings.Contains(gotBody, `"comment":"browserType.launch: webkit missing"`) {
+		t.Errorf("comment missing from body: %s", gotBody)
+	}
 }
 
 func TestUpdateRunCase_RejectsInvalidStatus(t *testing.T) {
 	c, _ := New(Options{BaseURL: "https://x", APIKey: "k"})
 	for _, s := range []string{"", "auto", "flaky", "PASSED", "weird"} {
-		if err := c.UpdateRunCase(context.Background(), "r1", "OB-50", s); err == nil {
+		if err := c.UpdateRunCase(context.Background(), "r1", "OB-50", s, ""); err == nil {
 			t.Errorf("status %q should be rejected", s)
 		}
 	}
@@ -98,7 +124,7 @@ func TestEnsureAndUpdateRunCase_PatchesDirectly_NoBatchAdd(t *testing.T) {
 	defer srv.Close()
 
 	c, _ := New(Options{BaseURL: srv.URL, APIKey: "k", Timeout: 2 * time.Second})
-	if err := c.EnsureAndUpdateRunCase(context.Background(), "r1", "OB-50", "passed"); err != nil {
+	if err := c.EnsureAndUpdateRunCase(context.Background(), "r1", "OB-50", "passed", ""); err != nil {
 		t.Fatalf("EnsureAndUpdateRunCase: %v", err)
 	}
 	if batchAdds.Load() != 0 {
@@ -122,7 +148,7 @@ func TestEnsureAndUpdateRunCase_404HintsAtServerLimitation(t *testing.T) {
 	c.InitialWait = 1 * time.Millisecond
 	c.MaxWait = 2 * time.Millisecond
 
-	err := c.EnsureAndUpdateRunCase(context.Background(), "r1", "MISSING-99", "passed")
+	err := c.EnsureAndUpdateRunCase(context.Background(), "r1", "MISSING-99", "passed", "")
 	if err == nil {
 		t.Fatal("expected error on 404")
 	}
