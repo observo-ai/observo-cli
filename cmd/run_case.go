@@ -36,7 +36,7 @@ func parseExampleCells(raw string) (map[string]string, error) {
 		if strings.TrimSpace(k) == "" {
 			return nil, fmt.Errorf(`--example-cells: empty parameter name not allowed`)
 		}
-		if v == "" {
+		if strings.TrimSpace(v) == "" {
 			return nil, fmt.Errorf(`--example-cells: empty value for parameter %q not allowed`, k)
 		}
 	}

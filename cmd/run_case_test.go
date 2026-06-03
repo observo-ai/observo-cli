@@ -211,6 +211,10 @@ func TestParseExampleCells(t *testing.T) {
 		{name: "nested object rejected", in: `{"params":{"browser":"chromium"}}`, wantErr: true, errSubstr: "invalid JSON"},
 		{name: "empty object rejected", in: `{}`, wantErr: true, errSubstr: "empty object"},
 		{name: "empty value rejected", in: `{"browser":""}`, wantErr: true, errSubstr: "empty value"},
+		// Whitespace-only key/value would reach the server as an unmatchable
+		// param row (silent 404 or no-op) — catch it at the CLI like the empty case.
+		{name: "whitespace-only value rejected", in: `{"browser":"   "}`, wantErr: true, errSubstr: "empty value"},
+		{name: "whitespace-only key rejected", in: `{"   ":"chromium"}`, wantErr: true, errSubstr: "empty parameter name"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
