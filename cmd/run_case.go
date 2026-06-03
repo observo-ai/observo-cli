@@ -2,7 +2,9 @@ package cmd
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/observo-ai/observo-cli/internal/api"
 	"github.com/observo-ai/observo-cli/internal/config"
@@ -11,6 +13,35 @@ import (
 
 	"github.com/spf13/cobra"
 )
+
+// parseExampleCells normalizes the --example-cells flag value. An empty/whitespace
+// string returns (nil, nil) — the classic, non-parametrized path. A non-empty
+// value MUST be a flat JSON object of string-keyed string values; nested objects,
+// arrays, or numbers are rejected loudly so the user sees a clear error instead
+// of a silent body shape the server then 4xx's. Keys/values cannot be empty —
+// they wouldn't match any example row's recorded param_values.
+func parseExampleCells(raw string) (map[string]string, error) {
+	s := strings.TrimSpace(raw)
+	if s == "" {
+		return nil, nil
+	}
+	var cells map[string]string
+	if err := json.Unmarshal([]byte(s), &cells); err != nil {
+		return nil, fmt.Errorf(`--example-cells: invalid JSON (must be a flat object of "name":"value" pairs, e.g. '{"browser":"chromium"}'): %w`, err)
+	}
+	if len(cells) == 0 {
+		return nil, fmt.Errorf(`--example-cells: empty object — omit the flag for a non-parametrized case`)
+	}
+	for k, v := range cells {
+		if strings.TrimSpace(k) == "" {
+			return nil, fmt.Errorf(`--example-cells: empty parameter name not allowed`)
+		}
+		if strings.TrimSpace(v) == "" {
+			return nil, fmt.Errorf(`--example-cells: empty value for parameter %q not allowed`, k)
+		}
+	}
+	return cells, nil
+}
 
 // runCaseCmd is the parent of `set` and `step` (which is itself a parent
 // of `set` — nested subcommand for per-step PATCH).
@@ -116,14 +147,15 @@ var runCaseStepCmd = &cobra.Command{
 }
 
 var (
-	rcssProject   string
-	rcssRunID     string
-	rcssCode      string
-	rcssStepIdx   int
-	rcssStatus    string
-	rcssComment   string
-	rcssFileURL   string
-	rcssStateFile string
+	rcssProject      string
+	rcssRunID        string
+	rcssCode         string
+	rcssStepIdx      int
+	rcssStatus       string
+	rcssComment      string
+	rcssFileURL      string
+	rcssExampleCells string // OB-406: JSON object of param-name -> value, e.g. {"browser":"chromium"}
+	rcssStateFile    string
 )
 
 var runCaseStepSetCmd = &cobra.Command{
@@ -154,6 +186,7 @@ func init() {
 	f.StringVar(&rcssStatus, "status", "", "passed | failed | skipped | blocked (required)")
 	f.StringVar(&rcssComment, "comment", "", "free-form text shown next to the step in the dashboard")
 	f.StringVar(&rcssFileURL, "file-url", "", "optional attachment URL to surface inline for the step")
+	f.StringVar(&rcssExampleCells, "example-cells", "", `JSON object of parameter values for a parametrized example, e.g. '{"browser":"chromium"}'. Targets that one example only; omit for non-parametrized cases`)
 	f.StringVar(&rcssStateFile, "state-file", state.DefaultPath, "where to read run_id from")
 	_ = runCaseStepSetCmd.MarkFlagRequired("code")
 	_ = runCaseStepSetCmd.MarkFlagRequired("step")
@@ -172,6 +205,13 @@ func runCaseStepSetExec(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("--step must be >= 1 (1-based), got %d", rcssStepIdx)
 	}
 
+	// OB-406: parse --example-cells once here so a malformed JSON shape is a
+	// CLI error (clear, fixable by the caller), not a 4xx surfaced from the API.
+	exampleCells, err := parseExampleCells(rcssExampleCells)
+	if err != nil {
+		return err
+	}
+
 	_, runID, err := resolveProjectAndRun(rcssProject, rcssRunID, rcssStateFile)
 	if err != nil {
 		return err
@@ -187,12 +227,13 @@ func runCaseStepSetExec(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 	if err := client.UpdateRunCaseStep(context.Background(), api.UpdateRunCaseStepRequest{
-		RunID:     runID,
-		ShortCode: rcssCode,
-		StepIndex: rcssStepIdx,
-		Status:    rcssStatus,
-		Comment:   rcssComment,
-		FileURL:   rcssFileURL,
+		RunID:        runID,
+		ShortCode:    rcssCode,
+		StepIndex:    rcssStepIdx,
+		Status:       rcssStatus,
+		Comment:      rcssComment,
+		FileURL:      rcssFileURL,
+		ExampleCells: exampleCells,
 	}); err != nil {
 		return fmt.Errorf("update run-case-step: %w", err)
 	}

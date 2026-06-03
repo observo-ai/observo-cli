@@ -118,6 +118,14 @@ type UpdateRunCaseStepRequest struct {
 	Status  string `json:"status"`             // passed|failed|skipped|blocked
 	Comment string `json:"comment,omitempty"`  // free-form text, shown in dashboard
 	FileURL string `json:"file_url,omitempty"` // attachment URL to surface inline
+
+	// OB-406: target a specific parametrized example by its parameter values.
+	// Omitted/empty -> the single (classic, non-parametrized) run-case. When the
+	// case IS parametrized, the server matches this map against the example's
+	// recorded param_values and patches THAT one example only — sibling examples
+	// stay untouched. Carried by the reporter as the test's per-variant data
+	// (see @observo-ai/playwright-reporter's `observo-cells` annotation).
+	ExampleCells map[string]string `json:"example_cells,omitempty"`
 }
 
 // UpdateRunCaseStep PATCHes a single step within a run-case by 1-based index.
