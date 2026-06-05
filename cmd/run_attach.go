@@ -14,12 +14,13 @@ import (
 )
 
 var (
-	raProject   string
-	raRunID     string
-	raFile      string
-	raCase      string
-	raCaseCode  string
-	raStateFile string
+	raProject      string
+	raRunID        string
+	raFile         string
+	raCase         string
+	raCaseCode     string
+	raStateFile    string
+	raExampleCells string
 )
 
 var runAttachCmd = &cobra.Command{
@@ -53,6 +54,12 @@ func init() {
 	f.StringVar(&raFile, "file", "", "local file path to upload (required)")
 	f.StringVar(&raCase, "case", "", "run-case short code (e.g. OB-76) to link the attachment to; needs --run-id/state. Omit for a run-level attachment")
 	f.StringVar(&raCaseCode, "code", "", "alias for --case (parity with 'run case set --code')")
+	// OB-437: required to disambiguate which example row of a parametrized case
+	// a case-level attachment belongs to. Shape matches `run case set` /
+	// `run case step set` (OB-405 / OB-423): flat JSON object of "param":"value"
+	// pairs. Ignored on a non-parametrized case (per the server's proto
+	// contract); required when the case IS parametrized.
+	f.StringVar(&raExampleCells, "example-cells", "", `JSON object of parameter values that pin a parametrized example row, e.g. '{"browser":"chromium"}'. Required when --case is a parametrized case`)
 	f.StringVar(&raStateFile, "state-file", state.DefaultPath, "where to read run_id from")
 	_ = runAttachCmd.MarkFlagRequired("file")
 }
@@ -71,6 +78,18 @@ func runAttachExec(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("--case (%q) and --code (%q) both set and differ; pass only one", raCase, raCaseCode)
 	case caseRef == "":
 		caseRef = raCaseCode
+	}
+
+	cells, err := parseExampleCells(raExampleCells)
+	if err != nil {
+		return err
+	}
+	// --example-cells without --case is nonsensical: the cells disambiguate
+	// AMONG example rows of a specific case, so the case identity is required.
+	// Catch it CLI-side so the server doesn't have to spend a round-trip
+	// returning InvalidArgument.
+	if len(cells) > 0 && caseRef == "" {
+		return fmt.Errorf("--example-cells requires --case to identify which parametrized case the row belongs to")
 	}
 
 	projectID, runID, err := resolveProjectAndRun(raProject, raRunID, raStateFile)
@@ -92,10 +111,11 @@ func runAttachExec(cmd *cobra.Command, _ []string) error {
 	}
 
 	att, err := client.UploadAttachment(context.Background(), api.UploadAttachmentRequest{
-		ProjectID: projectID,
-		RunID:     runID,
-		RunCaseID: caseRef, // empty → run-scoped; short code → server resolves the per-case row via run_id
-		FilePath:  raFile,
+		ProjectID:    projectID,
+		RunID:        runID,
+		RunCaseID:    caseRef, // empty → run-scoped; short code → server resolves the per-case row via run_id
+		ExampleCells: cells,
+		FilePath:     raFile,
 	})
 	if err != nil {
 		return fmt.Errorf("upload attachment: %w", err)
