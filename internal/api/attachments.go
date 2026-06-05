@@ -31,6 +31,12 @@ type UploadAttachmentRequest struct {
 	RunID         string
 	RunCaseID     string
 	RunCaseStepID string
+	// ExampleCells disambiguates which example row of a parametrized case a
+	// case-level attachment belongs to. Mirrors the shape used by
+	// `run case set` / `run case step set` (OB-405 / OB-423). Empty → classic
+	// (non-parametrized) routing. See OB-437 for the server-side resolution
+	// contract.
+	ExampleCells map[string]string
 }
 
 // uploadBody mirrors the server's UploadAttachmentRequest proto. The
@@ -47,12 +53,13 @@ type UploadAttachmentRequest struct {
 // bound to URL path parameter"). The URL path is the source of truth
 // for project_id.
 type uploadBody struct {
-	RunID         string `json:"run_id,omitempty"`
-	RunCaseID     string `json:"run_case_id,omitempty"`
-	RunCaseStepID string `json:"run_case_step_id,omitempty"`
-	FileName      string `json:"file_name"`
-	ContentType   string `json:"content_type,omitempty"`
-	Content       string `json:"content"` // base64-std-encoded file bytes
+	RunID         string            `json:"run_id,omitempty"`
+	RunCaseID     string            `json:"run_case_id,omitempty"`
+	RunCaseStepID string            `json:"run_case_step_id,omitempty"`
+	ExampleCells  map[string]string `json:"example_cells,omitempty"`
+	FileName      string            `json:"file_name"`
+	ContentType   string            `json:"content_type,omitempty"`
+	Content       string            `json:"content"` // base64-std-encoded file bytes
 }
 
 type uploadResponse struct {
@@ -97,6 +104,7 @@ func (c *Client) UploadAttachment(ctx context.Context, req UploadAttachmentReque
 		RunID:         req.RunID,
 		RunCaseID:     req.RunCaseID,
 		RunCaseStepID: req.RunCaseStepID,
+		ExampleCells:  req.ExampleCells,
 		FileName:      filepath.Base(req.FilePath),
 		ContentType:   detectContentType(req.FilePath, raw),
 		Content:       base64.StdEncoding.EncodeToString(raw),

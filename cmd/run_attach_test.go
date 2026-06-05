@@ -21,6 +21,7 @@ func resetRunAttachFlags() {
 	raCase = ""
 	raCaseCode = ""
 	raStateFile = state.DefaultPath
+	raExampleCells = ""
 }
 
 func TestRunAttach_E2E_ReadsRunIDFromStateFile(t *testing.T) {
@@ -205,5 +206,149 @@ func TestRunAttach_CaseAndCodeConflict(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "both set and differ") {
 		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+// OB-437: --example-cells JSON makes it into the upload POST body as
+// `example_cells` so the server's UploadAttachment handler can disambiguate
+// among parametrized example rows. Mirrors the wire-shape test pattern in
+// run_case_test.go:247 (OB-405 step writeback).
+func TestRunAttach_E2E_PassesExampleCellsInBody(t *testing.T) {
+	resetRunCreateFlags()
+	resetRunFinishFlags()
+	resetRunAttachFlags()
+	resetRootFlags()
+
+	var captured map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(body, &captured)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"attachment": map[string]any{"id": "att-1", "file_name": "trace.zip"},
+		})
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	file := filepath.Join(dir, "trace.zip")
+	if err := os.WriteFile(file, []byte("PK\x03\x04 fake"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var buf bytes.Buffer
+	rootCmd.SetOut(&buf)
+	rootCmd.SetErr(&buf)
+	rootCmd.SetArgs([]string{
+		"--api-key", "k",
+		"--base-url", srv.URL,
+		"run", "attach",
+		"--project", "OB",
+		"--run-id", "r1",
+		"--file", file,
+		"--case", "OB-76",
+		"--example-cells", `{"browser":"chromium"}`,
+	})
+	if err := rootCmd.Execute(); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	cells, ok := captured["example_cells"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected example_cells in body, got: %v", captured)
+	}
+	if cells["browser"] != "chromium" {
+		t.Errorf("expected browser=chromium, got %v", cells["browser"])
+	}
+	if got := captured["run_case_id"]; got != "OB-76" {
+		t.Errorf("expected run_case_id=OB-76, got %v", got)
+	}
+}
+
+// OB-437: --example-cells alone (no --case) is rejected CLI-side before any
+// network call. The cells disambiguate AMONG example rows of a specific case,
+// so the case identity is required to make the request meaningful.
+func TestRunAttach_ExampleCellsWithoutCase_FailsBeforeHTTP(t *testing.T) {
+	resetRunCreateFlags()
+	resetRunFinishFlags()
+	resetRunAttachFlags()
+	resetRootFlags()
+
+	called := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	file := filepath.Join(dir, "x.zip")
+	if err := os.WriteFile(file, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var buf bytes.Buffer
+	rootCmd.SetOut(&buf)
+	rootCmd.SetErr(&buf)
+	rootCmd.SetArgs([]string{
+		"--api-key", "k",
+		"--base-url", srv.URL,
+		"run", "attach",
+		"--project", "OB",
+		"--run-id", "r1",
+		"--file", file,
+		"--example-cells", `{"browser":"chromium"}`,
+	})
+	err := rootCmd.Execute()
+	if err == nil {
+		t.Fatal("expected error when --example-cells is set without --case")
+	}
+	if called {
+		t.Errorf("HTTP must NOT be called — guard is CLI-side")
+	}
+}
+
+// OB-437: malformed --example-cells JSON aborts before HTTP. parseExampleCells
+// already covers the JSON-parser path in run_case_test.go:371; this asserts
+// the SAME guard fires on the attach subcommand (i.e. we routed through the
+// shared helper, not a divergent local parser).
+func TestRunAttach_MalformedExampleCells_FailsBeforeHTTP(t *testing.T) {
+	resetRunCreateFlags()
+	resetRunFinishFlags()
+	resetRunAttachFlags()
+	resetRootFlags()
+
+	called := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	file := filepath.Join(dir, "x.zip")
+	if err := os.WriteFile(file, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var buf bytes.Buffer
+	rootCmd.SetOut(&buf)
+	rootCmd.SetErr(&buf)
+	rootCmd.SetArgs([]string{
+		"--api-key", "k",
+		"--base-url", srv.URL,
+		"run", "attach",
+		"--project", "OB",
+		"--run-id", "r1",
+		"--file", file,
+		"--case", "OB-76",
+		"--example-cells", `not-json`,
+	})
+	err := rootCmd.Execute()
+	if err == nil {
+		t.Fatal("expected error on malformed --example-cells")
+	}
+	if called {
+		t.Errorf("HTTP must NOT be called when --example-cells fails to parse")
 	}
 }
