@@ -17,6 +17,7 @@
 
 const path = require('node:path');
 const fs = require('node:fs');
+const os = require('node:os');
 const { spawnSync } = require('node:child_process');
 
 const NATIVE_NAME = process.platform === 'win32' ? 'observo-bin.exe' : 'observo-bin';
@@ -40,10 +41,12 @@ if (res.error) {
   process.exit(1);
 }
 
-// Re-raise a terminating signal as a non-zero exit so callers (CI, the
-// Playwright reporter's fire-and-forget spawn) see a faithful status.
+// Re-raise a terminating signal as the conventional 128 + signal-number
+// exit so callers (CI, the Playwright reporter's fire-and-forget spawn)
+// can distinguish a signal-kill (SIGINT → 130, SIGTERM → 143) from an
+// ordinary non-zero exit. Fall back to 1 for an unmapped signal name.
 if (res.signal) {
-  process.exit(1);
+  process.exit(128 + (os.constants.signals[res.signal] ?? 1));
 }
 
 process.exit(res.status === null ? 1 : res.status);

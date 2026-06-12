@@ -70,7 +70,25 @@ check('shim forwards args and exit code to observo-bin', () => {
   }
 });
 
-// 4. The shim must fail loudly when the native binary is missing.
+// 4. The shim must re-raise a signal-kill as 128 + signum, not a flat 1.
+check('shim maps a signal-kill to 128 + signum (SIGTERM → 143)', () => {
+  if (process.platform === 'win32') return; // POSIX signals only
+  const work = fs.mkdtempSync(path.join(os.tmpdir(), 'observo-sig-'));
+  try {
+    fs.copyFileSync(SHIM, path.join(work, 'observo'));
+    const fake = path.join(work, 'observo-bin');
+    fs.writeFileSync(fake, '#!/bin/sh\nkill -TERM $$\n');
+    fs.chmodSync(fake, 0o755);
+    const res = spawnSync(process.execPath, [path.join(work, 'observo')], { encoding: 'utf8' });
+    const expected = 128 + os.constants.signals.SIGTERM;
+    assert.strictEqual(res.status, expected,
+      `expected ${expected} (SIGTERM), got status=${res.status} signal=${res.signal}`);
+  } finally {
+    fs.rmSync(work, { recursive: true, force: true });
+  }
+});
+
+// 5. The shim must fail loudly when the native binary is missing.
 check('shim exits non-zero with guidance when observo-bin absent', () => {
   if (process.platform === 'win32') return;
   const work = fs.mkdtempSync(path.join(os.tmpdir(), 'observo-miss-'));
