@@ -16,7 +16,8 @@
     "observo": "./bin/observo"
   },
   "scripts": {
-    "postinstall": "node scripts/install.js"
+    "postinstall": "node scripts/install.js",
+    "test": "node test/verify-pack.js"
   },
   "files": [
     "bin/",
