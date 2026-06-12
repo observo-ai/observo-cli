@@ -44,7 +44,7 @@ if (res.error) {
 // Re-raise a terminating signal as the conventional 128 + signal-number
 // exit so callers (CI, the Playwright reporter's fire-and-forget spawn)
 // can distinguish a signal-kill (SIGINT → 130, SIGTERM → 143) from an
-// ordinary non-zero exit. Fall back to 1 for an unmapped signal name.
+// ordinary non-zero exit. An unmapped signal name falls back to 129 (128+1).
 if (res.signal) {
   process.exit(128 + (os.constants.signals[res.signal] ?? 1));
 }

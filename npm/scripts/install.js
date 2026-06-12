@@ -163,11 +163,9 @@ async function main() {
     );
   }
 
+  // Throws on every failure path (bad tar exit, missing extracted file,
+  // rename/copy error), so on return NATIVE_PATH is guaranteed to exist.
   extractNativeBinary(buf, url.endsWith('.zip') ? 'zip' : 'tar.gz');
-
-  if (!fs.existsSync(NATIVE_PATH)) {
-    throw new Error(`native binary missing after extraction at ${NATIVE_PATH}`);
-  }
 
   if (process.platform !== 'win32') {
     fs.chmodSync(NATIVE_PATH, 0o755);
