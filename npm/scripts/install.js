@@ -22,9 +22,17 @@ const zlib = require('node:zlib');
 
 const pkg = require('../package.json');
 const VERSION = pkg.version;
-const BINARY_NAME = process.platform === 'win32' ? 'observo.exe' : 'observo';
 const BIN_DIR = path.join(__dirname, '..', 'bin');
-const BIN_PATH = path.join(BIN_DIR, BINARY_NAME);
+// Name of the binary INSIDE the release archive (GoReleaser packs it as
+// `observo` / `observo.exe`).
+const ARCHIVE_BINARY_NAME = process.platform === 'win32' ? 'observo.exe' : 'observo';
+// Where we drop the native binary on disk. NOT `observo` — that name is
+// the committed Node launcher shim (bin/observo) that npm symlinks into
+// node_modules/.bin. We must not overwrite it, so the native binary lives
+// alongside it as `observo-bin` and the shim execs it. See bin/observo and
+// issue #17 / OB-432.
+const NATIVE_NAME = process.platform === 'win32' ? 'observo-bin.exe' : 'observo-bin';
+const NATIVE_PATH = path.join(BIN_DIR, NATIVE_NAME);
 
 // Platform → GoReleaser archive name mapping. Must match the
 // `name_template` in .goreleaser.yaml:
@@ -97,26 +105,33 @@ function followRedirects(url, depth = 0) {
   });
 }
 
-async function extractTarGz(buf, dest) {
-  // Avoid pulling tar/extract npm dep — use the system `tar` which exists
-  // on macOS, Linux, and Windows 10+ (1803+). Pipe via stdin.
-  const tmp = path.join(os.tmpdir(), `observo-${Date.now()}.tar.gz`);
-  fs.writeFileSync(tmp, buf);
+// Extract the native binary from the downloaded archive and place it at
+// NATIVE_PATH (bin/observo-bin). We extract into a private temp dir first,
+// then move the file into place — extracting directly into bin/ would write
+// a file named `observo` (the in-archive name) and clobber the committed
+// launcher shim. `ext` is the archive extension ('tar.gz' or 'zip'); the
+// system `tar` (present on macOS, Linux, and Windows 10 1803+) handles both.
+function extractNativeBinary(buf, ext) {
+  const work = fs.mkdtempSync(path.join(os.tmpdir(), 'observo-'));
+  const archive = path.join(work, `archive.${ext}`);
+  const extracted = path.join(work, ARCHIVE_BINARY_NAME);
+  fs.writeFileSync(archive, buf);
   try {
-    execSync(`tar -xzf "${tmp}" -C "${dest}" "${BINARY_NAME}"`, { stdio: 'inherit' });
+    execSync(`tar -xf "${archive}" -C "${work}" "${ARCHIVE_BINARY_NAME}"`, { stdio: 'inherit' });
+    if (!fs.existsSync(extracted)) {
+      throw new Error(`extracted archive did not contain ${ARCHIVE_BINARY_NAME}`);
+    }
+    // Move into place. Prefer rename; fall back to copy when the temp dir
+    // is on a different filesystem (EXDEV). The temp dir (and the leftover
+    // source after a copy) is removed in the finally block below.
+    try {
+      fs.renameSync(extracted, NATIVE_PATH);
+    } catch (err) {
+      if (err.code !== 'EXDEV') throw err;
+      fs.copyFileSync(extracted, NATIVE_PATH);
+    }
   } finally {
-    fs.unlinkSync(tmp);
-  }
-}
-
-function extractZip(buf, dest) {
-  // Windows: use built-in tar (also supports zip on 1803+).
-  const tmp = path.join(os.tmpdir(), `observo-${Date.now()}.zip`);
-  fs.writeFileSync(tmp, buf);
-  try {
-    execSync(`tar -xf "${tmp}" -C "${dest}" "${BINARY_NAME}"`, { stdio: 'inherit' });
-  } finally {
-    fs.unlinkSync(tmp);
+    fs.rmSync(work, { recursive: true, force: true });
   }
 }
 
@@ -148,24 +163,18 @@ async function main() {
     );
   }
 
-  if (url.endsWith('.zip')) {
-    extractZip(buf, BIN_DIR);
-  } else {
-    await extractTarGz(buf, BIN_DIR);
-  }
-
-  if (!fs.existsSync(BIN_PATH)) {
-    throw new Error(`extracted archive did not contain ${BINARY_NAME}`);
-  }
+  // Throws on every failure path (bad tar exit, missing extracted file,
+  // rename/copy error), so on return NATIVE_PATH is guaranteed to exist.
+  extractNativeBinary(buf, url.endsWith('.zip') ? 'zip' : 'tar.gz');
 
   if (process.platform !== 'win32') {
-    fs.chmodSync(BIN_PATH, 0o755);
+    fs.chmodSync(NATIVE_PATH, 0o755);
   }
 
   // Verify the binary runs and matches the requested version. Catches
   // GoReleaser version-skew bugs at install time, not first invocation.
   try {
-    const out = execSync(`"${BIN_PATH}" --version`, { encoding: 'utf8' });
+    const out = execSync(`"${NATIVE_PATH}" --version`, { encoding: 'utf8' });
     process.stdout.write(`observo: installed ${out.trim().split('\n')[0]}\n`);
   } catch (err) {
     throw new Error(`observo binary installed but failed to run: ${err.message}`);

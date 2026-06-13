@@ -1,0 +1,52 @@
+#!/usr/bin/env node
+// Committed launcher shim for the `observo` CLI.
+//
+// Why a Node shim instead of pointing `bin` straight at the native
+// binary: the native binary is NOT in the published npm tarball — it is
+// downloaded per-platform by scripts/install.js at postinstall time (see
+// that file for the why). npm performs bin-linking BEFORE postinstall
+// runs, so if `bin` pointed at a not-yet-existing native file, npm would
+// create no node_modules/.bin/observo symlink and both `observo` and
+// `npx observo` would fail with ENOENT on every fresh install (issue #17,
+// Jira OB-432).
+//
+// This shim DOES ship in the tarball, so it exists at link time and npm
+// links it reliably on every platform. At runtime it execs the native
+// binary that postinstall dropped next to it as `observo-bin`.
+'use strict';
+
+const path = require('node:path');
+const fs = require('node:fs');
+const os = require('node:os');
+const { spawnSync } = require('node:child_process');
+
+const NATIVE_NAME = process.platform === 'win32' ? 'observo-bin.exe' : 'observo-bin';
+const nativePath = path.join(__dirname, NATIVE_NAME);
+
+if (!fs.existsSync(nativePath)) {
+  process.stderr.write(
+    `observo: native binary missing at ${nativePath}\n` +
+    `The postinstall download did not complete. Re-run it with:\n` +
+    `  npm rebuild @observo-ai/cli\n` +
+    `or reinstall the package. If this persists, your install may have\n` +
+    `skipped lifecycle scripts (e.g. \`npm ci --ignore-scripts\`).\n`
+  );
+  process.exit(1);
+}
+
+const res = spawnSync(nativePath, process.argv.slice(2), { stdio: 'inherit' });
+
+if (res.error) {
+  process.stderr.write(`observo: failed to launch native binary: ${res.error.message}\n`);
+  process.exit(1);
+}
+
+// Re-raise a terminating signal as the conventional 128 + signal-number
+// exit so callers (CI, the Playwright reporter's fire-and-forget spawn)
+// can distinguish a signal-kill (SIGINT → 130, SIGTERM → 143) from an
+// ordinary non-zero exit. An unmapped signal name falls back to 129 (128+1).
+if (res.signal) {
+  process.exit(128 + (os.constants.signals[res.signal] ?? 1));
+}
+
+process.exit(res.status === null ? 1 : res.status);

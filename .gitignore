@@ -18,7 +18,11 @@ checksums.txt
 .env.local
 
 # npm wrapper build artifacts
-/npm/bin/
+#   npm/bin/observo is the COMMITTED launcher shim and MUST ship in the
+#   tarball (it is what npm symlinks into node_modules/.bin). Only the
+#   native binary, downloaded per-platform at install time, is ignored.
+/npm/bin/observo-bin
+/npm/bin/observo-bin.exe
 /npm/node_modules/
 
 # OS noise
