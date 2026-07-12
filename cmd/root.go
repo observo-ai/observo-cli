@@ -69,13 +69,26 @@ func init() {
 		"log HTTP requests/responses to stderr")
 }
 
+// exitOverride lets a subcommand request a specific process exit code
+// WITHOUT returning a cobra error (which would print "Error: …" to stderr).
+// `observo doctor` uses it: a non-zero exit means "not fully grounded", which
+// is a healthy diagnostic result — not a command failure — so it must not look
+// like one. nil = no override; the normal error→1 / success→0 mapping applies.
+var exitOverride *int
+
 // Execute runs the root command. Returns the exit code so main.go can
 // `os.Exit(cmd.Execute())` without importing os in two places.
 func Execute() int {
-	if err := rootCmd.Execute(); err != nil {
+	err := rootCmd.Execute()
+	// An explicit override wins over the generic mapping so a subcommand can
+	// exit non-zero on its own terms (doctor) while still returning nil to
+	// cobra (no spurious "Error:" line).
+	if exitOverride != nil {
+		return *exitOverride
+	}
+	if err != nil {
 		// Cobra already printed err to stderr; exit non-zero so CI scripts
 		// can detect failure without parsing output.
-		_ = err
 		return 1
 	}
 	return 0

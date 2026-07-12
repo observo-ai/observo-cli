@@ -69,6 +69,31 @@ func (c *Client) CreateRun(ctx context.Context, req CreateRunRequest) (*Run, err
 	return &resp.Run, nil
 }
 
+// listRunsResponse mirrors the server's ListTestRuns envelope.
+type listRunsResponse struct {
+	Runs []Run `json:"runs"`
+}
+
+// ListRuns calls GET /api/projects/{project_id}/runs. project_id may be a UUID
+// or a short code — the server resolves both. Runs come back latest-first
+// (server orders by started_at DESC, created_at DESC) and each carries its
+// pipeline metadata (layers + coverage attachment IDs), which `observo doctor`
+// reads to detect execution/trace evidence on the most recent CI run.
+//
+// Read-only; account-scoped API-key auth is accepted by the server.
+func (c *Client) ListRuns(ctx context.Context, projectRef string) ([]Run, error) {
+	if projectRef == "" {
+		return nil, fmt.Errorf("ListRuns: project_id required")
+	}
+	path := "/api/projects/" + url.PathEscape(projectRef) + "/runs"
+
+	var resp listRunsResponse
+	if err := c.DoJSON(ctx, "GET", path, nil, &resp); err != nil {
+		return nil, err
+	}
+	return resp.Runs, nil
+}
+
 // UpdateRunRequest mirrors the server's PATCH /api/projects/{id}/runs/{id} body.
 // We only expose status today; OB-D will extend if needed.
 type UpdateRunRequest struct {
