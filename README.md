@@ -40,6 +40,7 @@ observo <command> [global flags]
 COMMANDS:
   version                  Print version, commit, build date
   help                     Show this help
+  doctor                   Diagnose the repo's Observo integration (grounding ladder L0–L3)
   run create               Create a TestRun from a regression plan
   run finish               Mark a run passed/failed/aborted
   run case set             PATCH a run-case status (+ optional --comment) by short code
@@ -65,6 +66,49 @@ ENV:
                     Create one at https://app.observoai.co/settings/api-keys.
   OBSERVO_BASE_URL  API base URL (default: https://api.observoai.co).
                     Override for self-hosted / staging.
+```
+
+## Diagnosing setup — `observo doctor`
+
+`observo doctor` answers "what do I still need to configure?" in one command,
+instead of reading docs or opening PRs. It prints the **grounding ladder** — the
+same L0–L3 levels the [Coverage-Truth Verdict](https://observoai.co/docs) reports
+on your PRs — with ✅/❌ per rung and, for the first failing one, the single exact fix:
+
+```text
+🩺 observo doctor — ACME
+
+🧭 Grounding: Level 1 of 3 (project-grounded)
+
+  ✅ L0 code-only          Coverage-Truth Verdict workflow present …
+  ✅ L1 project-grounded   project resolved: ACME (Acme Web) — via $OBSERVO_PROJECT
+  ❌ L2 execution-verified latest CI run has no coverage evidence …
+  ⬜ L3 e2e-traced         requires Level 2 (coverage evidence) first
+
+🔦 Next (to reach Level 2): Have the Observo pipeline attach coverage profiles + junit …
+```
+
+| Level | Reached when | Unlocks |
+| --- | --- | --- |
+| **L0** code-only | a Coverage-Truth Verdict workflow is present | diff + static test read on every PR |
+| **L1** project-grounded | the project resolves (see below) + a valid API key | managed-case checks, cross-PR memory, verdict writeback |
+| **L2** execution-verified | the latest CI run attached coverage evidence | backend `COVERED` proven by a real run (catches skipped / `-short` tests) |
+| **L3** e2e-traced | the latest CI run has a Playwright layer | UI behaviours verified end-to-end |
+
+- **Read-only** — doctor never mutates your repo or your Observo data (every call is a GET).
+- **Exit code reflects health** — `0` when fully grounded, non-zero otherwise, so it
+  runs as a CI preflight step. Gate at a lower rung with `--min-level N` (e.g.
+  `observo doctor --min-level 1` to require only project grounding).
+- **Project resolution** (same order the verdict uses): `--project` →
+  `$OBSERVO_PROJECT` → `$OBSERVO_PROJECT_CODE` (deprecated) → the sole project in
+  the account.
+- Needs only your repo + an API key — **no local checkout of Observo** required.
+
+```bash
+observo doctor                     # human ladder, exit 0 only when fully grounded
+observo doctor --json              # machine-readable report for CI
+observo doctor --min-level 1       # preflight: pass once the project is grounded
+observo doctor --project ACME      # ground against a specific project code
 ```
 
 ## Importing Playwright runs
