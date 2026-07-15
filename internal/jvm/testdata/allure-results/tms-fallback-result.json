@@ -1,0 +1,14 @@
+{
+  "name": "legacy tms linked case",
+  "fullName": "api.LegacyTest.legacyCase",
+  "status": "skipped",
+  "start": 6000,
+  "stop": 6000,
+  "labels": [
+    {"name": "testClass", "value": "api.LegacyTest"},
+    {"name": "testMethod", "value": "legacyCase"}
+  ],
+  "links": [
+    {"name": "PD-300", "type": "tms"}
+  ]
+}

@@ -1,0 +1,13 @@
+{
+  "name": "health check returns 200",
+  "fullName": "api.HealthTest.healthReturns200",
+  "status": "passed",
+  "start": 5000,
+  "stop": 5030,
+  "labels": [
+    {"name": "tag", "value": "observo:PD-200"},
+    {"name": "feature", "value": "Platform"},
+    {"name": "testClass", "value": "api.HealthTest"},
+    {"name": "testMethod", "value": "healthReturns200"}
+  ]
+}
