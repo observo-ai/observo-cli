@@ -225,6 +225,69 @@ Running the default import alongside the live reporter would create
 duplicate attachments in the dashboard; `--extract-only` is the clean
 composition.
 
+## Bridging JVM suites — `observo jvm`
+
+Links a Kotlin/Java suite (TestNG or JUnit5, usually with Allure) to Observo
+cases and writes results back, without rewriting a single test.
+
+Tests link to cases through one canonical key — `observo:<code>` — expressed
+with each framework's **native** tagging mechanism. There is no Observo
+annotation and no new test-runtime dependency:
+
+```kotlin
+@Test(groups = ["observo:PD-101"])          // TestNG
+fun `trader creates a wallet`() { … }
+
+@Test @Tag("observo:PD-101")                // JUnit5
+fun `trader creates a wallet`() { … }
+
+@TmsLink("PD-101")                          // Allure — fallback join
+```
+
+### Prerequisites
+
+Results are read from Allure (`allure-results/`) and/or `testng-results.xml` —
+nothing needs to change in how you run tests.
+
+**TestNG suites:** the `groups` join lives in `testng-results.xml`, and Allure
+does not carry it. TestNG only writes that file when default listeners are on,
+which Gradle leaves **off**:
+
+```kotlin
+useTestNG { useDefaultListeners(true) }
+```
+
+Without it there is no join — every case resolves untracked and nothing links.
+
+### Usage
+
+Replace `PD` with your own project code.
+
+```bash
+# Existing suite → Observo. Dry-run by default; --apply writes.
+observo jvm import --from allure-results --testng-results build/reports/tests/test/testng-results.xml \
+  --project PD
+observo jvm import --from allure-results --project PD --apply
+
+# Observo → new test skeletons, join tag already in place.
+observo jvm stub --cases PD-201,PD-202 --out src/test/kotlin/api/pd --framework testng
+
+# After a run: write pass/fail/skip + captured HTTP traffic back.
+observo jvm push --from allure-results --plan REGR-MAIN-CI --project PD
+```
+
+`import` is a **dev-machine operation** — it produces a diff someone has to
+commit. Under `CI=true` it refuses `--apply` unless `--allow-ci` is also given.
+
+Order-dependent classes (a shared session, methods ordered by `priority`) are
+modelled as one case with N ordered steps by default; `--chain=flat` gives N
+cases plus a plan preserving the order.
+
+Gradle users can skip the CLI install entirely — the
+[`ai.observo` Gradle plugin](https://github.com/observo-ai/observo-jvm) wraps
+these same commands as tasks and writes back automatically after
+`./gradlew test`.
+
 ## Contributing
 
 Local build:
