@@ -159,6 +159,43 @@ func TestJVMStub_CollidingClassNamesStayValidIdentifiers(t *testing.T) {
 	}
 }
 
+func TestJVMStub_SuiteFetchFailureWarnsNotSilent(t *testing.T) {
+	resetStubFlags()
+	// GetSuite returns 500 (not just not-found): the case must still stub
+	// (without @Feature) AND a warning must be surfaced, not swallowed.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/case/PD-101":
+			_, _ = w.Write([]byte(`{"test_case":{"short_code":"PD-101","name":"one","layer":"LAYER_API","suite_id":"s1","project_id":"p1"}}`))
+		case "/api/projects/p1/suites/s1":
+			http.Error(w, "boom", http.StatusInternalServerError)
+		default:
+			http.Error(w, "nf", http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+	outDir := t.TempDir()
+
+	out, err := executeRoot(t, "jvm", "stub", "--cases", "PD-101",
+		"--out", outDir, "--api-key", "k", "--base-url", srv.URL)
+	if err != nil {
+		t.Fatalf("execute: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "warning: suite s1") {
+		t.Errorf("suite-fetch failure must warn, got:\n%s", out)
+	}
+	// The stub is still generated, just without @Feature.
+	entries, _ := os.ReadDir(outDir)
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 stub file despite suite failure, got %d", len(entries))
+	}
+	data, _ := os.ReadFile(filepath.Join(outDir, entries[0].Name()))
+	if strings.Contains(string(data), "@Feature") {
+		t.Errorf("expected no @Feature when suite unreadable:\n%s", data)
+	}
+}
+
 func TestJVMStub_RequiresCasesAndOut(t *testing.T) {
 	resetStubFlags()
 	if _, err := executeRoot(t, "jvm", "stub", "--out", "x", "--api-key", "k"); err == nil {

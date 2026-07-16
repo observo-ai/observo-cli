@@ -3,6 +3,7 @@ package cmd
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -100,7 +101,7 @@ func jvmStubExec(cmd *cobra.Command, args []string) error {
 	}
 
 	ctx := context.Background()
-	classes, err := buildStubClasses(ctx, client, codes, pkg)
+	classes, err := buildStubClasses(ctx, client, codes, pkg, cmd.ErrOrStderr())
 	if err != nil {
 		return err
 	}
@@ -150,7 +151,7 @@ func jvmStubExec(cmd *cobra.Command, args []string) error {
 // buildStubClasses fetches each case, resolves its suite name (cached),
 // and groups cases sharing a suite into one class. Suite order follows the
 // first case that referenced it, so output is deterministic.
-func buildStubClasses(ctx context.Context, client *api.Client, codes []string, pkg string) ([]jvm.StubClass, error) {
+func buildStubClasses(ctx context.Context, client *api.Client, codes []string, pkg string, stderr io.Writer) ([]jvm.StubClass, error) {
 	suiteNames := map[string]string{} // suite_id → name (cache)
 	bySuite := map[string]*jvm.StubClass{}
 	var order []string // suite keys in first-seen order
@@ -168,7 +169,11 @@ func buildStubClasses(ctx context.Context, client *api.Client, codes []string, p
 				s, sErr := client.GetSuite(ctx, tc.ProjectID, tc.SuiteID)
 				if sErr != nil {
 					// A missing/inaccessible suite must not sink the whole
-					// run — the case still stubs, just without @Feature.
+					// run — the case still stubs, just without @Feature. But
+					// this swallows ANY error (401/500/network), not only
+					// not-found, so surface it rather than degrade silently.
+					fmt.Fprintf(stderr, "warning: suite %s (case %s) unreadable: %v — stubbing without @Feature\n",
+						tc.SuiteID, code, sErr)
 					name = ""
 				} else {
 					name = s.Name
