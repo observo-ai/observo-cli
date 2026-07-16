@@ -44,6 +44,15 @@ type getTestCaseResponse struct {
 // GetTestCaseByCode resolves a test case by its compound short code
 // (e.g. "PD-101") via GET /api/case/{compound_code}. The code encodes the
 // project, so no project_id is needed.
+//
+// Route verified against the server (separate repo): proto
+// service_observo.proto binds rpc GetTestCaseByCompoundCode to
+// `get: "/api/case/{compound_code}"`; the handler
+// gapi/rpc_get_test_case_by_compound_code.go authorizes via
+// server.authorize(...) — the account-API-key path (not JWT-only
+// authorizedUser) — so the CLI's account key is accepted. This is a
+// deliberate top-level (non-project-scoped) route because the compound
+// code is globally unique per account.
 func (c *Client) GetTestCaseByCode(ctx context.Context, code string) (*TestCase, error) {
 	code = strings.TrimSpace(code)
 	if code == "" {

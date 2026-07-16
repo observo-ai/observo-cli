@@ -20,6 +20,12 @@ type getSuiteResponse struct {
 
 // GetSuite resolves a suite by UUID within a project via
 // GET /api/projects/{project_id}/suites/{id}.
+//
+// Route verified against the server (separate repo): proto
+// service_observo.proto binds rpc GetTestSuite to
+// `get: "/api/projects/{project_id}/suites/{id}"`; the handler authorizes
+// via server.authorizeProjectAccessOrAPIKey(...), so the CLI's account key
+// is accepted.
 func (c *Client) GetSuite(ctx context.Context, projectID, suiteID string) (*Suite, error) {
 	if projectID == "" {
 		return nil, errors.New("GetSuite: project_id required")
