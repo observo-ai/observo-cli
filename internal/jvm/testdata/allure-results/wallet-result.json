@@ -1,0 +1,14 @@
+{
+  "name": "trader creates a wallet",
+  "fullName": "api.pd.PdBackendE2ETest.traderCreatesWallet",
+  "status": "passed",
+  "description": "Wallet is created on first login",
+  "start": 1000,
+  "stop": 1120,
+  "labels": [
+    {"name": "feature", "value": "PD Wallet"},
+    {"name": "story", "value": "Onboarding"},
+    {"name": "testClass", "value": "api.pd.PdBackendE2ETest"},
+    {"name": "testMethod", "value": "traderCreatesWallet"}
+  ]
+}

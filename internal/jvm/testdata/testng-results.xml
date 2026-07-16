@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testng-results total="4" passed="2" failed="1" skipped="0">
+  <suite name="Surefire suite">
+    <groups>
+      <group name="observo:PD-101">
+        <method name="traderCreatesWallet" class="api.pd.PdBackendE2ETest"/>
+      </group>
+      <group name="observo:PD-102">
+        <method name="traderDeposits" class="api.pd.PdBackendE2ETest"/>
+      </group>
+      <group name="smoke">
+        <method name="traderCreatesWallet" class="api.pd.PdBackendE2ETest"/>
+      </group>
+    </groups>
+    <test name="Surefire test">
+      <class name="api.pd.PdBackendE2ETest">
+        <test-method status="PASS" name="setUp" is-config="true" started-at="2026-07-15T10:00:00Z" duration-ms="5"/>
+        <test-method status="PASS" name="traderCreatesWallet" started-at="2026-07-15T10:00:01Z" duration-ms="120"/>
+        <test-method status="FAIL" name="traderDeposits" started-at="2026-07-15T10:00:02Z" duration-ms="80"/>
+        <test-method status="PASS" name="untaggedProbe" started-at="2026-07-15T10:00:03Z" duration-ms="10"/>
+        <test-method status="PASS" name="tearDown" is-config="true" started-at="2026-07-15T10:00:04Z" duration-ms="3"/>
+      </class>
+    </test>
+  </suite>
+</testng-results>

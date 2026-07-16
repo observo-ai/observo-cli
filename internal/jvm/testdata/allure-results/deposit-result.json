@@ -1,0 +1,14 @@
+{
+  "name": "trader deposits funds",
+  "fullName": "api.pd.PdBackendE2ETest.traderDeposits",
+  "status": "failed",
+  "description": "push DOES create a deposit order — live-verified (PD-742)",
+  "start": 2000,
+  "stop": 2080,
+  "labels": [
+    {"name": "feature", "value": "PD Wallet"},
+    {"name": "story", "value": "Deposits"},
+    {"name": "testClass", "value": "api.pd.PdBackendE2ETest"},
+    {"name": "testMethod", "value": "traderDeposits"}
+  ]
+}

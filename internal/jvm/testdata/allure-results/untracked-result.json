@@ -1,0 +1,11 @@
+{
+  "name": "untagged probe",
+  "fullName": "api.pd.PdBackendE2ETest.untaggedProbe",
+  "status": "passed",
+  "start": 3000,
+  "stop": 3010,
+  "labels": [
+    {"name": "testClass", "value": "api.pd.PdBackendE2ETest"},
+    {"name": "testMethod", "value": "untaggedProbe"}
+  ]
+}
