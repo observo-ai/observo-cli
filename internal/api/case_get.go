@@ -11,6 +11,7 @@ import (
 // (currently for `jvm stub`). Field names mirror the server's snake_case
 // JSON (grpc-gateway MarshalOptions.UseProtoNames=true).
 type TestCase struct {
+	ID             string         `json:"id"` // UUID — used as test_case_ids in CreatePlan
 	ShortCode      string         `json:"short_code"`
 	Name           string         `json:"name"`
 	Description    string         `json:"description"`

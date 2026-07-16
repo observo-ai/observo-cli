@@ -7,6 +7,16 @@ import (
 	"net/url"
 )
 
+// ErrPlanNotFound reports that a plan genuinely does not exist, as distinct
+// from a lookup that failed to answer.
+//
+// Callers that create-if-absent MUST tell the two apart. GetPlanByKey resolves
+// a key by listing, so a network blip, an exhausted retry or an auth hiccup all
+// surface as an error too — and treating those as "absent" makes the next
+// import create a duplicate plan. Only errors.Is(err, ErrPlanNotFound) means
+// "safe to create".
+var ErrPlanNotFound = errors.New("plan not found")
+
 // Plan is the subset of the Observo Plan shape the CLI consumes.
 // Cases is the snapshot at fetch time — server returns the same short
 // codes that `create run --plan KEY` would seed into a new run.
@@ -93,7 +103,15 @@ func (c *Client) GetPlanByKey(ctx context.Context, projectID, planIDOrKey string
 		return nil, errors.New("GetPlanByKey: plan_id or plan_key required")
 	}
 	if isUUID(planIDOrKey) {
-		return c.GetPlan(ctx, projectID, planIDOrKey)
+		p, err := c.GetPlan(ctx, projectID, planIDOrKey)
+		if err != nil {
+			var herr *HTTPError
+			if errors.As(err, &herr) && herr.StatusCode == 404 {
+				return nil, fmt.Errorf("%w: plan_id %s in project %s", ErrPlanNotFound, planIDOrKey, projectID)
+			}
+			return nil, err
+		}
+		return p, nil
 	}
 	plans, err := c.ListPlans(ctx, projectID)
 	if err != nil {
@@ -104,7 +122,35 @@ func (c *Client) GetPlanByKey(ctx context.Context, projectID, planIDOrKey string
 			return c.GetPlan(ctx, projectID, p.ID)
 		}
 	}
-	return nil, fmt.Errorf("no plan with plan_key %q found in project %s", planIDOrKey, projectID)
+	return nil, fmt.Errorf("%w: plan_key %q in project %s", ErrPlanNotFound, planIDOrKey, projectID)
+}
+
+type createPlanBody struct {
+	Name        string   `json:"name"`
+	PlanKey     string   `json:"plan_key,omitempty"`
+	TestCaseIDs []string `json:"test_case_ids,omitempty"`
+}
+
+// CreatePlan creates a plan (optionally seeded with ordered case UUIDs) via
+// POST /api/projects/{project_id}/plans. Used by `jvm import --chain=flat` to
+// preserve an order-dependent chain's sequence as a plan.
+func (c *Client) CreatePlan(ctx context.Context, projectID, planKey, name string, caseIDs []string) (*Plan, error) {
+	if projectID == "" {
+		return nil, errors.New("CreatePlan: project_id required")
+	}
+	if name == "" {
+		return nil, errors.New("CreatePlan: name required")
+	}
+	path := "/api/projects/" + url.PathEscape(projectID) + "/plans"
+	body := createPlanBody{Name: name, PlanKey: planKey, TestCaseIDs: caseIDs}
+	var resp getPlanResponse
+	if err := c.DoJSON(ctx, "POST", path, body, &resp); err != nil {
+		return nil, err
+	}
+	if resp.Plan.ID == "" {
+		return nil, errors.New("CreatePlan: response missing plan.id")
+	}
+	return &resp.Plan, nil
 }
 
 // isUUID is a cheap shape check (8-4-4-4-12 hex with dashes). We don't
