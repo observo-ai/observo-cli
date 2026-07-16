@@ -107,6 +107,34 @@ func (c *Client) GetPlanByKey(ctx context.Context, projectID, planIDOrKey string
 	return nil, fmt.Errorf("no plan with plan_key %q found in project %s", planIDOrKey, projectID)
 }
 
+type createPlanBody struct {
+	Name        string   `json:"name"`
+	PlanKey     string   `json:"plan_key,omitempty"`
+	TestCaseIDs []string `json:"test_case_ids,omitempty"`
+}
+
+// CreatePlan creates a plan (optionally seeded with ordered case UUIDs) via
+// POST /api/projects/{project_id}/plans. Used by `jvm import --chain=flat` to
+// preserve an order-dependent chain's sequence as a plan.
+func (c *Client) CreatePlan(ctx context.Context, projectID, planKey, name string, caseIDs []string) (*Plan, error) {
+	if projectID == "" {
+		return nil, errors.New("CreatePlan: project_id required")
+	}
+	if name == "" {
+		return nil, errors.New("CreatePlan: name required")
+	}
+	path := "/api/projects/" + url.PathEscape(projectID) + "/plans"
+	body := createPlanBody{Name: name, PlanKey: planKey, TestCaseIDs: caseIDs}
+	var resp getPlanResponse
+	if err := c.DoJSON(ctx, "POST", path, body, &resp); err != nil {
+		return nil, err
+	}
+	if resp.Plan.ID == "" {
+		return nil, errors.New("CreatePlan: response missing plan.id")
+	}
+	return &resp.Plan, nil
+}
+
 // isUUID is a cheap shape check (8-4-4-4-12 hex with dashes). We don't
 // import google/uuid here to keep this package free of cross-module
 // deps.
