@@ -15,9 +15,26 @@ annotation, no new test-runtime dependency:
   TestNG   @Test(groups = ["observo:PD-101"])
   Allure   @TmsLink("PD-101")                 (fallback join)
 
-Subcommands (this release ships 'manifest'; import/stub/push follow in
-OB-544 / OB-549 / OB-546):
-  observo jvm manifest    build observo-link-manifest.json from run reports`,
+Subcommands:
+  observo jvm manifest    build observo-link-manifest.json from run reports
+  observo jvm import      create/upsert Observo cases & suites from a run
+  observo jvm stub        generate Kotlin test skeletons from Observo cases
+  observo jvm push        write run results + HTTP evidence back to a run
+
+New suite (write tests against cases that already exist):
+  observo jvm stub --cases PD-201,PD-202 --out src/test/kotlin/api/pd
+  ./gradlew test
+  observo jvm push --from allure-results --plan REGR-MAIN-CI
+
+Existing suite (bring the code into Observo first):
+  observo jvm import --from allure-results --project PD           # preview
+  observo jvm import --from allure-results --project PD --apply
+
+TestNG note: the groups join lives in testng-results.xml, which Allure does
+not carry — pass --testng-results alongside --from, and enable TestNG's
+default listeners so the file is written at all:
+
+  useTestNG { useDefaultListeners(true) }`,
 }
 
 func init() {
