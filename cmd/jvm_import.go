@@ -239,8 +239,18 @@ func executeImport(ctx context.Context, client *api.Client, project, layer, prio
 	for _, pp := range plan.Plans {
 		// Idempotent: skip if a plan with this key already exists (re-import
 		// must not create a duplicate plan — CreatePlan does no key check).
-		if existing, gErr := client.GetPlanByKey(ctx, project, pp.Key); gErr == nil && existing != nil {
+		existing, gErr := client.GetPlanByKey(ctx, project, pp.Key)
+		if gErr == nil && existing != nil {
 			fmt.Fprintf(stderr, "plan %s already exists — skipped\n", pp.Key)
+			continue
+		}
+		// Only a genuine not-found may fall through to create. GetPlanByKey
+		// resolves a key by listing, so a transient 5xx / timeout / auth hiccup
+		// errors out too — and reading that as "absent" duplicates the plan on
+		// every re-import. Same discipline as the tagged-case probe above.
+		if gErr != nil && !errors.Is(gErr, api.ErrPlanNotFound) {
+			fmt.Fprintf(stderr, "error: verify plan %s: %v (skipping to avoid a duplicate)\n", pp.Key, gErr)
+			summary.Errors++
 			continue
 		}
 

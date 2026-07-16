@@ -83,7 +83,7 @@ func TestJVMImport_ApplyFlatCreatesSkipsAndPlans(t *testing.T) {
 			var b map[string]any
 			_ = json.NewDecoder(r.Body).Decode(&b)
 			planIDs, _ = b["test_case_ids"].([]any)
-			w.Write([]byte(`{"plan":{"id":"p1","plan_key":"CHAIN-CHAIN"}}`))
+			w.Write([]byte(`{"plan":{"id":"p1","plan_key":"CHAIN-D791DF-CHAIN"}}`))
 		default:
 			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
 			http.Error(w, "nf", 404)
@@ -199,9 +199,9 @@ func TestJVMImport_PlanIdempotentWhenKeyExists(t *testing.T) {
 			w.Write([]byte(`{"test_case":{"id":"c2","short_code":"PD-300","name":"y"}}`))
 		case r.URL.Path == "/api/projects/PD/plans" && r.Method == "GET":
 			// Plan already exists with the derived key.
-			w.Write([]byte(`{"plans":[{"id":"p1","plan_key":"CHAIN-CHAIN"}]}`))
+			w.Write([]byte(`{"plans":[{"id":"p1","plan_key":"CHAIN-D791DF-CHAIN"}]}`))
 		case r.URL.Path == "/api/projects/PD/plans/p1" && r.Method == "GET":
-			w.Write([]byte(`{"plan":{"id":"p1","plan_key":"CHAIN-CHAIN"}}`))
+			w.Write([]byte(`{"plan":{"id":"p1","plan_key":"CHAIN-D791DF-CHAIN"}}`))
 		case r.URL.Path == "/api/projects/PD/plans" && r.Method == "POST":
 			counts["create_plan"]++ // MUST NOT happen — plan exists
 			w.Write([]byte(`{"plan":{"id":"p2"}}`))
@@ -222,6 +222,92 @@ func TestJVMImport_PlanIdempotentWhenKeyExists(t *testing.T) {
 	}
 	if !strings.Contains(out, "already exists — skipped") {
 		t.Errorf("expected plan-skip diagnostic, got:\n%s", out)
+	}
+}
+
+func TestJVMImport_PlanProbeTransientErrorDoesNotDuplicate(t *testing.T) {
+	resetImportFlags()
+	t.Setenv("CI", "")
+	var mu sync.Mutex
+	counts := map[string]int{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/api/projects/PD/suites" && r.Method == "GET":
+			w.Write([]byte(`{"suites":[{"suite":{"id":"s1","name":"Wallet"},"children":[]}]}`))
+		case r.URL.Path == "/api/case/PD-101":
+			w.Write([]byte(`{"test_case":{"id":"c1","short_code":"PD-101","name":"x"}}`))
+		case strings.HasSuffix(r.URL.Path, "/cases") && r.Method == "POST":
+			w.Write([]byte(`{"test_case":{"id":"c2","short_code":"PD-300","name":"y"}}`))
+		case r.URL.Path == "/api/projects/PD/plans" && r.Method == "GET":
+			http.Error(w, "boom", http.StatusInternalServerError) // transient!
+		case r.URL.Path == "/api/projects/PD/plans" && r.Method == "POST":
+			counts["create_plan"]++ // MUST NOT happen — existence is unknown
+			w.Write([]byte(`{"plan":{"id":"p2"}}`))
+		default:
+			w.Write([]byte(`{}`))
+		}
+	}))
+	defer srv.Close()
+	mf := writeImportManifest(t, chainManifestJSON)
+
+	out, err := executeRoot(t, "jvm", "import", "--manifest", mf, "--project", "PD",
+		"--chain", "flat", "--apply", "--api-key", "k", "--base-url", srv.URL)
+	if err != nil {
+		t.Fatalf("execute: %v\n%s", err, out)
+	}
+	// The key resolves by listing plans, so a 5xx there means "unknown", not
+	// "absent". Creating on unknown duplicates the plan on every retried import
+	// — the same trap the tracked-case probe above already guards.
+	if counts["create_plan"] != 0 {
+		t.Errorf("transient plan-probe error created a plan (create_plan=%d)", counts["create_plan"])
+	}
+	if !strings.Contains(out, "to avoid a duplicate") {
+		t.Errorf("expected skip-to-avoid-duplicate diagnostic, got:\n%s", out)
+	}
+}
+
+func TestJVMImport_PlanCreatedWhenGenuinelyAbsent(t *testing.T) {
+	// The other side of the guard above: a real "no such plan" (an empty list,
+	// answered successfully) must still create. Without this, tightening the
+	// probe could quietly stop creating plans altogether and every flat-chain
+	// import would lose its ordering.
+	resetImportFlags()
+	t.Setenv("CI", "")
+	var mu sync.Mutex
+	counts := map[string]int{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/api/projects/PD/suites" && r.Method == "GET":
+			w.Write([]byte(`{"suites":[{"suite":{"id":"s1","name":"Wallet"},"children":[]}]}`))
+		case r.URL.Path == "/api/case/PD-101":
+			w.Write([]byte(`{"test_case":{"id":"c1","short_code":"PD-101","name":"x"}}`))
+		case strings.HasSuffix(r.URL.Path, "/cases") && r.Method == "POST":
+			w.Write([]byte(`{"test_case":{"id":"c2","short_code":"PD-300","name":"y"}}`))
+		case r.URL.Path == "/api/projects/PD/plans" && r.Method == "GET":
+			w.Write([]byte(`{"plans":[]}`)) // genuinely absent
+		case r.URL.Path == "/api/projects/PD/plans" && r.Method == "POST":
+			counts["create_plan"]++
+			w.Write([]byte(`{"plan":{"id":"p2","plan_key":"CHAIN-D791DF-CHAIN"}}`))
+		default:
+			w.Write([]byte(`{}`))
+		}
+	}))
+	defer srv.Close()
+	mf := writeImportManifest(t, chainManifestJSON)
+
+	out, err := executeRoot(t, "jvm", "import", "--manifest", mf, "--project", "PD",
+		"--chain", "flat", "--apply", "--api-key", "k", "--base-url", srv.URL)
+	if err != nil {
+		t.Fatalf("execute: %v\n%s", err, out)
+	}
+	if counts["create_plan"] != 1 {
+		t.Errorf("absent plan must be created exactly once (create_plan=%d)\n%s", counts["create_plan"], out)
 	}
 }
 

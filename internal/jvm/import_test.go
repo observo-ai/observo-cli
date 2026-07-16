@@ -1,6 +1,73 @@
 package jvm
 
-import "testing"
+import (
+	"regexp"
+	"strings"
+	"testing"
+)
+
+// planKeyRules mirrors the server's val.ValidateRunKey, which plan_key reuses.
+// A generated key that breaks it is rejected at create time.
+var planKeyRules = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
+
+func TestChainPlanKey(t *testing.T) {
+	t.Run("different packages sharing a simple class name do not collide", func(t *testing.T) {
+		// The reason the key can't be the simple name alone: sibling modules
+		// naming a class SmokeTest is ordinary, and because the importer skips a
+		// plan whose key already exists, a collision means the second chain's
+		// plan is never created and nothing says so.
+		a := chainPlanKey("api.pd.SmokeTest")
+		b := chainPlanKey("api.trading.SmokeTest")
+		if a == b {
+			t.Fatalf("both chains derived %q — the second chain's plan would be silently skipped", a)
+		}
+	})
+
+	t.Run("is stable across calls", func(t *testing.T) {
+		// Re-import matches an existing plan BY KEY, so a key that moved between
+		// runs would duplicate every plan instead of matching it.
+		const id = "api.pd.PdBackendE2ETest"
+		if first, second := chainPlanKey(id), chainPlanKey(id); first != second {
+			t.Fatalf("unstable key: %q then %q", first, second)
+		}
+	})
+
+	t.Run("keeps the simple class name readable", func(t *testing.T) {
+		got := chainPlanKey("api.pd.PdBackendE2ETest")
+		if !strings.HasPrefix(got, "PDBACKENDE2ETEST-") || !strings.HasSuffix(got, "-CHAIN") {
+			t.Errorf("key = %q, want PDBACKENDE2ETEST-<digest>-CHAIN", got)
+		}
+	})
+
+	t.Run("a deep package still fits the server's plan_key rules", func(t *testing.T) {
+		// Why the full fq name can't just be sanitised into the key.
+		got := chainPlanKey("com.acme.platform.integration.tests.api.payments.PaymentFlowRegressionE2ETest")
+		if len(got) > planKeyMaxLen {
+			t.Errorf("key %q is %d chars, server caps plan_key at %d", got, len(got), planKeyMaxLen)
+		}
+		if !planKeyRules.MatchString(got) {
+			t.Errorf("key %q leaves the server's allowed charset", got)
+		}
+	})
+
+	t.Run("sanitises characters legal in JVM class names but not in plan_key", func(t *testing.T) {
+		// A nested class is Outer$Inner on the JVM; '$' is rejected by the server.
+		got := chainPlanKey("api.pd.Outer$Inner")
+		if !planKeyRules.MatchString(got) {
+			t.Errorf("key %q leaves the server's allowed charset", got)
+		}
+	})
+
+	t.Run("a chain id of only punctuation still yields a valid key", func(t *testing.T) {
+		got := chainPlanKey("...")
+		if !planKeyRules.MatchString(got) || got == "" {
+			t.Errorf("key = %q, want a valid non-empty key", got)
+		}
+		if len(got) > planKeyMaxLen {
+			t.Errorf("key %q exceeds %d chars", got, planKeyMaxLen)
+		}
+	})
+}
 
 // chainManifest builds a manifest with a 3-method chain (2 tracked, 1
 // untracked) plus one standalone tracked case.
@@ -35,8 +102,10 @@ func TestPlanImport_Flat(t *testing.T) {
 	if len(pp.CaseFQNames) != 3 || pp.CaseFQNames[0] != want[0] || pp.CaseFQNames[2] != want[2] {
 		t.Errorf("plan order wrong: %v", pp.CaseFQNames)
 	}
-	if pp.Key != "CHAIN-CHAIN" {
-		t.Errorf("plan key = %q, want CHAIN-CHAIN", pp.Key)
+	// Simple class name + a digest of the FULL chain id: the bare simple name
+	// collides across packages (see TestChainPlanKey).
+	if pp.Key != "CHAIN-944660-CHAIN" {
+		t.Errorf("plan key = %q, want CHAIN-944660-CHAIN", pp.Key)
 	}
 	// Features deduped (PD Wallet once + Platform).
 	if len(plan.Features) != 2 {

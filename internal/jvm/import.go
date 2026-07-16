@@ -1,6 +1,8 @@
 package jvm
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"sort"
 	"strings"
@@ -10,6 +12,14 @@ import (
 const (
 	ChainSteps = "steps" // an order-dependent class → 1 case with N ordered steps
 	ChainFlat  = "flat"  // → N cases + a plan preserving the order
+)
+
+// plan_key limits mirror the server's val.ValidateRunKey: 1-64 chars from
+// [A-Za-z0-9_-]. A generated key that breaks either is rejected on create.
+const (
+	planKeyMaxLen    = 64
+	planKeySuffix    = "-CHAIN"
+	planKeyDigestLen = 6
 )
 
 // ImportOptions configures PlanImport.
@@ -211,9 +221,51 @@ func chainDisplayName(chainID string, es []LinkEntry) string {
 	return simpleClassName(chainID)
 }
 
-// chainPlanKey derives a stable, human-readable plan key from a chain's
-// class name, e.g. "api.pd.PdBackendE2ETest" → "PDBACKENDE2ETEST-CHAIN".
+// chainPlanKey derives a stable, URL-safe plan key from a chain's fq class
+// name, e.g. "api.pd.PdBackendE2ETest" → "PDBACKENDE2ETEST-8B1A47-CHAIN".
+//
+// The simple class name alone is NOT unique. "api.pd.SmokeTest" and
+// "api.trading.SmokeTest" are different chains that would collide on
+// "SMOKETEST-CHAIN" — and because the caller skips a plan whose key already
+// exists, the second chain's plan would be silently never created. A shared
+// simple class name across packages is ordinary in multi-module JVM suites.
+//
+// The fq name can't be used verbatim either: the server caps plan_key at 64
+// chars and allows only [A-Za-z0-9_-] (val.ValidateRunKey), which a deep
+// package name blows past — trading a silent collision for a rejected plan.
+//
+// So: the readable simple name, plus a short digest of the FULL chain id for
+// uniqueness, truncated to fit. The digest is content-derived and therefore
+// stable across runs, which idempotent re-import depends on — a key that moved
+// between imports would duplicate every plan.
 func chainPlanKey(chainID string) string {
-	up := strings.ToUpper(simpleClassName(chainID))
-	return up + "-CHAIN"
+	sum := sha256.Sum256([]byte(chainID))
+	digest := strings.ToUpper(hex.EncodeToString(sum[:]))[:planKeyDigestLen]
+
+	name := sanitizePlanKey(strings.ToUpper(simpleClassName(chainID)))
+	// budget = 64 − "-CHAIN" − digest − the dash before the digest
+	budget := planKeyMaxLen - len(planKeySuffix) - planKeyDigestLen - 1
+	if len(name) > budget {
+		name = name[:budget]
+	}
+	name = strings.Trim(name, "-")
+	if name == "" {
+		// A chain id of only punctuation still has to yield a valid key.
+		return "CHAIN-" + digest + planKeySuffix
+	}
+	return name + "-" + digest + planKeySuffix
+}
+
+// sanitizePlanKey maps anything outside the server's plan_key charset
+// ([A-Za-z0-9_-]) to a dash. Nested JVM classes ("Outer$Inner") and Kotlin
+// backtick names reach here with characters the server rejects.
+func sanitizePlanKey(s string) string {
+	return strings.Map(func(r rune) rune {
+		switch {
+		case r >= 'A' && r <= 'Z', r >= 'a' && r <= 'z', r >= '0' && r <= '9', r == '_', r == '-':
+			return r
+		default:
+			return '-'
+		}
+	}, s)
 }
