@@ -1,10 +1,24 @@
 package jvm
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 )
+
+// LoadManifest reads a previously-emitted observo-link-manifest.json.
+func LoadManifest(path string) (*LinkManifest, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read manifest %s: %w", path, err)
+	}
+	var m LinkManifest
+	if err := json.Unmarshal(b, &m); err != nil {
+		return nil, fmt.Errorf("parse manifest %s: %w", path, err)
+	}
+	return &m, nil
+}
 
 // ErrNoSource is returned when BuildManifest is called with no report
 // source at all.
