@@ -56,16 +56,23 @@ jobs:
           # Allowlist the tools the inline prompt actually needs. Without
           # `Bash(gh *)` the action sandbox blocks the final `gh pr comment`
           # call (this was the silent-fail mode on the plugin path too).
-          claude_args: '--allowed-tools "Bash(gh *),Bash(git diff*),Bash(git log*),Read,Grep,Glob"'
+          #
+          # `Bash(git fetch*)` is allowed even though checkout's fetch-depth: 0
+          # already makes fetching unnecessary: the model reaches for it on its
+          # own, and a denial derails the review before it starts (see the
+          # prompt change below). Allowing a redundant fetch costs nothing;
+          # denying it cost a whole review.
+          claude_args: '--allowed-tools "Bash(gh *),Bash(git fetch*),Bash(git diff*),Bash(git log*),Read,Grep,Glob"'
           prompt: |
             You are reviewing pull request #${{ github.event.pull_request.number }} ("${{ github.event.pull_request.title }}") in this repository.
 
             Process:
-            1. Run `git fetch origin ${{ github.event.pull_request.base.ref }}` then `git diff origin/${{ github.event.pull_request.base.ref }}...HEAD` to scope changes.
+            1. Run `git diff origin/${{ github.event.pull_request.base.ref }}...HEAD` to scope changes. The checkout is already full-depth, so no fetch is needed first.
             2. For each changed Go file, read the surrounding context and look for correctness bugs only: inverted/wrong conditions, off-by-one, null/undefined deref, missing error-return propagation, retry-on-non-retryable, swallowed errors, concurrency races, broken invariants the diff failed to re-establish, CLI flag wiring bugs (declared but not read), and API-contract drift (wire shape ≠ server proto / endpoint guesses that may 404). Pay extra attention to: HTTP client retry semantics, multipart vs JSON content-type for the attachments endpoint, short-code-vs-UUID validation on case/run paths, supply-chain risks in npm/scripts/install.js and docs/install (checksum verification).
             3. Ignore style nits, alternative implementations, missing comments, naming preferences, "could also do X" suggestions. Only real bugs.
             4. Cap findings at 8. Rank by severity (highest first).
             5. If there are no real bugs, post a single short comment saying "No correctness issues found in this diff." — do NOT pad with positive feedback.
+            6. ALWAYS post exactly one comment before you finish — including when you could not review. If a tool call is denied, the diff comes back empty, or anything else stops you, post "## Automated review" with a one-line explanation of what blocked you instead of ending the turn. Never finish silently: this job exits 0 either way, so a missing comment renders a PASSING check that nobody reviewed, which is worse than an outright failure.
 
             Post the review as ONE markdown comment via:
               gh pr comment ${{ github.event.pull_request.number }} --body "<markdown>"
