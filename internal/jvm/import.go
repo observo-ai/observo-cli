@@ -54,6 +54,11 @@ type PlannedCase struct {
 	Steps []PlannedStep
 
 	FQName string // primary source test (standalone case); "" for a chain case
+
+	// References are the durable ticket/link refs to attach to this case
+	// (OB-551). Carried for standalone / flat-mode cases; a steps-mode chain
+	// case carries none (its methods' refs are not folded into the synthetic case).
+	References []Reference
 }
 
 // PlannedPlan preserves an order-dependent chain's sequence as a plan
@@ -127,6 +132,7 @@ func PlanImport(m *LinkManifest, opts ImportOptions) (*ImportPlan, error) {
 			ChainID:     e.ChainID,
 			Order:       e.Order,
 			FQName:      e.FQName,
+			References:  e.References,
 		}
 		if e.Tracked() {
 			pc.Tracked = true

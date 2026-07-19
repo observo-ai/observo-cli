@@ -85,6 +85,7 @@ type importSummaryJVM struct {
 	CasesCreated  int      `json:"cases_created"`
 	CasesLinked   int      `json:"cases_linked"` // tracked → already existed, skipped
 	PlansCreated  int      `json:"plans_created"`
+	ReferencesSet int      `json:"references_set"` // OB-551: ticket/link refs attached to cases
 	Untagged      []string `json:"untagged,omitempty"`    // fqName=code for standalone cases needing a source tag
 	ChainCases    []string `json:"chain_cases,omitempty"` // steps-mode chain cases (re-create until write-back ships)
 	DryRun        bool     `json:"dry_run,omitempty"`
@@ -137,6 +138,7 @@ func jvmImportExec(cmd *cobra.Command, args []string) error {
 			} else {
 				summary.CasesCreated++
 			}
+			summary.ReferencesSet += len(c.References)
 		}
 	} else {
 		cfg := config.Resolve(flagAPIKey, flagBaseURL, flagJSON, flagVerbose)
@@ -181,6 +183,9 @@ func executeImport(ctx context.Context, client *api.Client, project, layer, prio
 				fqToID[pc.FQName] = tc.ID
 				summary.CasesLinked++
 				fmt.Fprintf(stderr, "link: %s already exists (%s) — skipped\n", pc.Code, pc.FQName)
+				// Enrich the existing case with its references too (OB-551) — a
+				// tracked case is skipped for creation but still gains its refs.
+				attachImportedReferences(ctx, client, tc.ID, pc.References, summary, stderr)
 				continue
 			}
 			// Only a genuine 404 means the tag is stale (case deleted) → recreate.
@@ -219,6 +224,7 @@ func executeImport(ctx context.Context, client *api.Client, project, layer, prio
 			continue
 		}
 		summary.CasesCreated++
+		attachImportedReferences(ctx, client, tc.ID, pc.References, summary, stderr)
 
 		if len(pc.Steps) > 0 {
 			// A steps-mode chain case is created new every run (no code to
@@ -301,6 +307,32 @@ func executeImport(ctx context.Context, client *api.Client, project, layer, prio
 // ensureSuites resolves each feature name to a suite id, reusing an existing
 // suite by name (dedup) and creating any that are missing. Returns the
 // name→id map and the count created.
+// attachImportedReferences sets a case's imported ticket/link references (OB-551).
+// Non-fatal: references are enrichment, not the core import, so a failure warns
+// and counts an error without aborting the run (mirrors writeback's stance). A
+// case with no references is a no-op — nothing is invented, and no API call is made.
+//
+// The replace-by-source guarantee is therefore one-directional: adding or
+// changing a test's refs propagates on re-import, but REMOVING every ref from a
+// test does not clear its previously-imported refs (empty → no call fires). That
+// is the deliberate trade for not spending an API call per ref-less case; a full
+// re-sync would call SetTestCaseReferences with an empty list for every case.
+func attachImportedReferences(ctx context.Context, client *api.Client, caseID string, refs []jvm.Reference, summary *importSummaryJVM, stderr io.Writer) {
+	if len(refs) == 0 {
+		return
+	}
+	inputs := make([]api.CaseReferenceInput, 0, len(refs))
+	for _, r := range refs {
+		inputs = append(inputs, api.CaseReferenceInput{Kind: r.Kind, Value: r.Value, Label: r.Label, URL: r.URL})
+	}
+	if err := client.SetTestCaseReferences(ctx, caseID, inputs); err != nil {
+		fmt.Fprintf(stderr, "warn: attach references to %s: %v\n", caseID, err)
+		summary.Errors++
+		return
+	}
+	summary.ReferencesSet += len(inputs)
+}
+
 func ensureSuites(ctx context.Context, client *api.Client, project string, features []string) (map[string]string, int, error) {
 	existing, err := client.ListSuites(ctx, project)
 	if err != nil {
@@ -412,6 +444,7 @@ func importSummaryToMap(s importSummaryJVM) map[string]any {
 		"cases_created":  s.CasesCreated,
 		"cases_linked":   s.CasesLinked,
 		"plans_created":  s.PlansCreated,
+		"references_set": s.ReferencesSet,
 		"untagged":       s.Untagged,
 		"chain_cases":    s.ChainCases,
 		"dry_run":        s.DryRun,
@@ -424,7 +457,7 @@ func importSummaryHuman(s importSummaryJVM) string {
 	if s.DryRun {
 		prefix = "dry-run: would import"
 	}
-	return fmt.Sprintf("%s project=%s chain=%s suites+%d cases+%d linked=%d plans+%d untagged=%d errors=%d",
+	return fmt.Sprintf("%s project=%s chain=%s suites+%d cases+%d linked=%d plans+%d refs+%d untagged=%d errors=%d",
 		prefix, s.Project, s.Chain, s.SuitesCreated, s.CasesCreated, s.CasesLinked,
-		s.PlansCreated, len(s.Untagged), s.Errors)
+		s.PlansCreated, s.ReferencesSet, len(s.Untagged), s.Errors)
 }

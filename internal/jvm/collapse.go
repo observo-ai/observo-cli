@@ -91,5 +91,8 @@ func mergeInto(base *LinkEntry, e LinkEntry) {
 	if base.SourceRef == "" {
 		base.SourceRef = e.SourceRef
 	}
+	if len(base.References) == 0 {
+		base.References = e.References
+	}
 	base.Result = aggregateResult(base.Result, e.Result)
 }
