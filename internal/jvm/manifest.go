@@ -52,6 +52,27 @@ type LinkEntry struct {
 
 	Result    *Result `json:"result,omitempty"`     // present only when built from a real run
 	SourceRef string  `json:"source_ref,omitempty"` // file:line — supplied by the listener (OB-547)
+
+	// References are durable case references extracted from the report (OB-551):
+	// ticket-refs (Allure @Issue) and links (@Link). Empty when the test carries
+	// none — nothing is invented. Import attaches them to the case via
+	// SetTestCaseReferences.
+	References []Reference `json:"references,omitempty"`
+}
+
+// Reference kinds. "rationale" exists server-side but the report path never
+// emits it (the WHY prose lives in Description); import only produces ticket/link.
+const (
+	RefKindTicket = "ticket"
+	RefKindLink   = "link"
+)
+
+// Reference is one external reference on a test — a ticket-ref or a link.
+type Reference struct {
+	Kind  string `json:"kind"`            // ticket | link
+	Value string `json:"value"`           // ticket key (PD-742) or url
+	Label string `json:"label,omitempty"` // display label
+	URL   string `json:"url,omitempty"`   // resolved URL when the report carries one
 }
 
 // Result is the per-test outcome, present only when the manifest was built

@@ -32,6 +32,7 @@ type allureLabel struct {
 type allureLink struct {
 	Name string `json:"name"`
 	Type string `json:"type"`
+	URL  string `json:"url"`
 }
 
 // ParseAllureResults reads every `*-result.json` in an Allure results
@@ -99,9 +100,28 @@ func (ar allureResult) toEntry() LinkEntry {
 			testMethod = l.Value
 		}
 	}
+	var refs []Reference
 	for _, l := range ar.Links {
-		if strings.EqualFold(l.Type, "tms") {
+		switch strings.ToLower(l.Type) {
+		case "tms":
+			// tms is the code-resolution fallback (join key), never a reference.
 			tms = append(tms, l.Name)
+		case "issue":
+			// @Issue("PD-742") → a ticket ref. Name is the key; URL may be set
+			// when the suite configured an issue link pattern.
+			if l.Name != "" {
+				refs = append(refs, Reference{Kind: RefKindTicket, Value: l.Name, Label: l.Name, URL: l.URL})
+			}
+		default:
+			// @Link(...) and other custom links → a link ref. Needs a url or
+			// name to be meaningful; invent nothing for an empty link.
+			if l.URL != "" || l.Name != "" {
+				val := l.URL
+				if val == "" {
+					val = l.Name
+				}
+				refs = append(refs, Reference{Kind: RefKindLink, Value: val, Label: l.Name, URL: l.URL})
+			}
 		}
 	}
 
@@ -116,6 +136,7 @@ func (ar allureResult) toEntry() LinkEntry {
 		Description: ar.Description,
 		Feature:     feature,
 		Story:       story,
+		References:  refs,
 	}
 	if code := Resolve(tags, tms); code != "" {
 		e.Code = &code

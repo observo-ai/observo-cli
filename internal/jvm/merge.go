@@ -58,6 +58,10 @@ func Merge(testng, allure []LinkEntry) []LinkEntry {
 		if !base.Tracked() && a.Tracked() {
 			base.Code = a.Code
 		}
+		// References come from Allure (@Issue/@Link); TestNG results carry none.
+		if len(base.References) == 0 {
+			base.References = a.References
+		}
 	}
 	return out
 }
