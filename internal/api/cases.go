@@ -29,12 +29,16 @@ func IsValidCaseStatus(s string) bool {
 // BatchAddCases attaches one or more test cases (by short code) to a
 // run.
 //
-// NOT used by EnsureAndUpdateRunCase anymore — the server's
-// /cases:batch_add rejects short codes (UUID-only) and uses JWT-only
-// auth, so the CLI's account-scoped API-key path always fails on it.
-// Kept public for callers that already have UUIDs and JWT auth, and
-// for future use once OB-340 (server-side: accept short codes + API
-// key, mirror of OB-247 pattern) ships.
+// OB-600: the server's /cases:batch_add now accepts short codes via the
+// dedicated `test_case_codes` field (resolved account+private-project
+// scoped) and authorizes account-scoped API keys — so the CLI's API-key
+// path works here now. (Previously it sent codes in `test_case_ids`,
+// which the server validated as UUIDs and rejected, and the endpoint was
+// PASETO/JWT-only — hence this was pulled out of EnsureAndUpdateRunCase.)
+//
+// Primary caller: `observo run case add`, used to PRE-ATTACH a plan-less
+// run's cases up front (the Prove loop) so each later writeback finds its
+// case already attached instead of 404-ing.
 func (c *Client) BatchAddCases(ctx context.Context, runID string, shortCodes []string) error {
 	if runID == "" {
 		return errors.New("BatchAddCases: run_id required")
@@ -44,7 +48,7 @@ func (c *Client) BatchAddCases(ctx context.Context, runID string, shortCodes []s
 	}
 
 	path := "/api/runs/" + url.PathEscape(runID) + "/cases:batch_add"
-	body := map[string][]string{"test_case_ids": shortCodes}
+	body := map[string][]string{"test_case_codes": shortCodes}
 	return c.DoJSON(ctx, "POST", path, body, nil)
 }
 
