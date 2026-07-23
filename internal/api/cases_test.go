@@ -29,7 +29,9 @@ func TestBatchAddCases_PostsArrayShape(t *testing.T) {
 	if gotMethod != "POST" || gotPath != "/api/runs/r1/cases:batch_add" {
 		t.Errorf("method/path: %s %s", gotMethod, gotPath)
 	}
-	if !strings.Contains(gotBody, `"test_case_ids":["OB-50","OB-51"]`) {
+	// OB-600: codes go in the dedicated test_case_codes field (the server
+	// validates test_case_ids as UUIDs and would reject short codes there).
+	if !strings.Contains(gotBody, `"test_case_codes":["OB-50","OB-51"]`) {
 		t.Errorf("body: %s", gotBody)
 	}
 }

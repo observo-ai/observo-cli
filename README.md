@@ -43,6 +43,7 @@ COMMANDS:
   doctor                   Diagnose the repo's Observo integration (grounding ladder L0–L3)
   run create               Create a TestRun from a regression plan
   run finish               Mark a run passed/failed/aborted
+  run case add             Attach cases to a run by short code (pre-attach before writeback)
   run case set             PATCH a run-case status (+ optional --comment) by short code
   run case step set        Update a single step's status within a run case
   run attach               Upload an artifact (junit, lcov, html, ...) to a run
