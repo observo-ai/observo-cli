@@ -85,7 +85,7 @@ type importSummaryJVM struct {
 	CasesCreated  int      `json:"cases_created"`
 	CasesLinked   int      `json:"cases_linked"` // tracked → already existed, skipped
 	PlansCreated  int      `json:"plans_created"`
-	ReferencesSet int      `json:"references_set"` // OB-551: ticket/link refs attached to cases
+	ReferencesSet int      `json:"references_set"`        // OB-551: ticket/link refs attached to cases
 	Untagged      []string `json:"untagged,omitempty"`    // fqName=code for standalone cases needing a source tag
 	ChainCases    []string `json:"chain_cases,omitempty"` // steps-mode chain cases (re-create until write-back ships)
 	DryRun        bool     `json:"dry_run,omitempty"`
@@ -247,6 +247,17 @@ func executeImport(ctx context.Context, client *api.Client, project, layer, prio
 		// must not create a duplicate plan — CreatePlan does no key check).
 		existing, gErr := client.GetPlanByKey(ctx, project, pp.Key)
 		if gErr == nil && existing != nil {
+			fmt.Fprintf(stderr, "plan %s already exists — skipped\n", pp.Key)
+			continue
+		}
+		// This probe asks one question: does the plan exist? A plan whose cases
+		// carry no short code answers YES — the read got far enough to find it,
+		// and only the case projection failed. Import does not look at cases, so
+		// treating that as a verification failure would inflate the error count
+		// and print an alarming message for a condition this command is
+		// indifferent to. The strictness belongs to `plan resolve`, which does
+		// need the codes.
+		if errors.Is(gErr, api.ErrPlanCasesUnusable) {
 			fmt.Fprintf(stderr, "plan %s already exists — skipped\n", pp.Key)
 			continue
 		}

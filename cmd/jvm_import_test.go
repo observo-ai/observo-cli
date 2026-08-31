@@ -225,6 +225,62 @@ func TestJVMImport_PlanIdempotentWhenKeyExists(t *testing.T) {
 	}
 }
 
+// A plan whose cases carry no short code still EXISTS, and existence is the
+// only thing this probe asks. Import never looks at cases, so the read must
+// skip the plan like any other existing one — not report a verification
+// failure and inflate the error count for a condition it is indifferent to.
+//
+// Reachable against an Observo older than the one this CLI speaks to, where
+// GetTestPlan sends plan-case rows without a short_code (pre-OB-852).
+func TestJVMImport_PlanWithUnusableCasesCountsAsExisting(t *testing.T) {
+	resetImportFlags()
+	t.Setenv("CI", "")
+	var mu sync.Mutex
+	counts := map[string]int{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/api/projects/PD/suites" && r.Method == "GET":
+			w.Write([]byte(`{"suites":[{"suite":{"id":"s1","name":"Wallet"},"children":[]}]}`))
+		case r.URL.Path == "/api/case/PD-101":
+			w.Write([]byte(`{"test_case":{"id":"c1","short_code":"PD-101","name":"x"}}`))
+		case strings.HasSuffix(r.URL.Path, "/cases") && r.Method == "POST":
+			w.Write([]byte(`{"test_case":{"id":"c2","short_code":"PD-300","name":"y"}}`))
+		case r.URL.Path == "/api/projects/PD/plans" && r.Method == "GET":
+			w.Write([]byte(`{"plans":[{"id":"p1","plan_key":"CHAIN-D791DF-CHAIN"}]}`))
+		case r.URL.Path == "/api/projects/PD/plans/p1" && r.Method == "GET":
+			// Cases present, none carrying a short code: GetPlan returns
+			// api.ErrPlanCasesUnusable rather than an empty case list.
+			w.Write([]byte(`{"plan":{"id":"p1","plan_key":"CHAIN-D791DF-CHAIN"},` +
+				`"cases":[{"test_case_id":"c1"},{"test_case_id":"c2"}]}`))
+		case r.URL.Path == "/api/projects/PD/plans" && r.Method == "POST":
+			counts["create_plan"]++ // MUST NOT happen — plan exists
+			w.Write([]byte(`{"plan":{"id":"p2"}}`))
+		default:
+			w.Write([]byte(`{}`))
+		}
+	}))
+	defer srv.Close()
+	mf := writeImportManifest(t, chainManifestJSON)
+
+	out, err := executeRoot(t, "jvm", "import", "--manifest", mf, "--project", "PD",
+		"--chain", "flat", "--apply", "--api-key", "k", "--base-url", srv.URL)
+	if err != nil {
+		t.Fatalf("execute: %v\n%s", err, out)
+	}
+	if counts["create_plan"] != 0 {
+		t.Errorf("existing plan must not be re-created (create_plan=%d)", counts["create_plan"])
+	}
+	if !strings.Contains(out, "already exists — skipped") {
+		t.Errorf("expected the plan-skip diagnostic, got:\n%s", out)
+	}
+	if strings.Contains(out, "error: verify plan") {
+		t.Errorf("a plan that exists must not be reported as a verification failure:\n%s", out)
+	}
+}
+
 func TestJVMImport_PlanProbeTransientErrorDoesNotDuplicate(t *testing.T) {
 	resetImportFlags()
 	t.Setenv("CI", "")

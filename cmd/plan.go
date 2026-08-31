@@ -40,17 +40,23 @@ Formats:
                       observo plan resolve --plan REGR --project OB | xargs ...
 
   grep              Playwright-friendly --grep regex:
-                      @observo:(OB-50|OB-51|OB-52)
-                    Pipe directly into the Playwright invocation:
-                      npx playwright test --grep "$(observo plan resolve \
-                        --plan REGR --project OB --format grep)"
+                      @observo:(OB-50|OB-51|OB-52)(?![0-9])
+                    Capture it FIRST and check the exit status — on failure
+                    stdout is empty, and an empty --grep matches EVERY test:
+                      g=$(observo plan resolve --plan REGR --project OB \
+                            --format grep) || exit 1
+                      npx playwright test --grep "$g"
 
   json              Full plan object via the global --json flag. Same as
                     --json with format=codes; included for symmetry.
 
-Empty plan → empty output (codes) or 'NONE_MATCH_REGEX' sentinel (grep,
-so Playwright skips everything rather than matching all). Caller should
-check exit code (0 = found, non-zero = error contacting API).`,
+Empty plan → empty output (codes) or a never-match sentinel (grep, so
+Playwright skips everything rather than matching all). An empty plan is a
+successful answer and exits 0.
+
+Non-zero means the plan could not be resolved into codes: the API was
+unreachable, the plan_key does not exist, or the server returned cases
+without short codes (an Observo older than the one this CLI speaks to).`,
 	Args: cobra.NoArgs,
 	RunE: planResolveExec,
 }
@@ -101,11 +107,12 @@ func planResolveExec(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("resolve plan: %w", err)
 	}
 
+	// No empty-code filter here: GetPlan either returns every case with a code
+	// or fails (api.ErrPlanCasesUnusable). Skipping blanks would re-introduce
+	// exactly the quiet under-run that failing the read exists to prevent.
 	codes := make([]string, 0, len(plan.Cases))
 	for _, c := range plan.Cases {
-		if c.ShortCode != "" {
-			codes = append(codes, c.ShortCode)
-		}
+		codes = append(codes, c.ShortCode)
 	}
 
 	out := cmd.OutOrStdout()
@@ -130,6 +137,20 @@ func planResolveExec(cmd *cobra.Command, _ []string) error {
 // in the basic Playwright dialect; short codes are typically [A-Z]+-[0-9]+
 // so no escaping needed in practice — but we escape defensively).
 //
+// The trailing `(?![0-9])` is load-bearing. --grep is an unanchored
+// RegExp.test against the test title, so a bare alternation lets a short code
+// match a LONGER one that starts with it: `OB-1` matches `@observo:OB-171`.
+// That is not theoretical — REGR-MAIN-CI carries OB-1 and OB-5 while the suite
+// carries OB-171/172/173 and OB-50..OB-59, so without the boundary the plan
+// tier runs specs nobody attached to the plan, and the run created FROM the
+// plan has no case for their results to land on. The plan would report the
+// cases it holds while a different set actually executed — the same lie as
+// resolving to nothing, pointing the other way.
+//
+// This never fired before: plan.Cases was always nil (OB-852), so this
+// function only ever returned the sentinel. The first real code reaching it is
+// the first time the bug is reachable.
+//
 // Empty input returns the neverMatchRegex sentinel so an empty plan
 // causes Playwright to run zero tests rather than every test.
 func buildGrepRegex(codes []string) string {
@@ -140,7 +161,7 @@ func buildGrepRegex(codes []string) string {
 	for i, c := range codes {
 		esc[i] = regexEscapeShortCode(c)
 	}
-	return "@observo:(" + strings.Join(esc, "|") + ")"
+	return "@observo:(" + strings.Join(esc, "|") + ")(?![0-9])"
 }
 
 // regexEscapeShortCode escapes the characters that could appear in

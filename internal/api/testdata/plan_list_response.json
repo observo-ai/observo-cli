@@ -1,0 +1,22 @@
+{
+  "plans":  [
+    {
+      "id":  "0c09f220-3e4c-4b0e-9755-ff29877284c4",
+      "project_id":  "62f171a7-1934-4d35-a8a0-86afdd74baa3",
+      "name":  "Regression — main CI",
+      "description":  "capture fixture",
+      "created_at":  "2026-08-31T12:41:18.594426Z",
+      "updated_at":  "2026-08-31T12:41:18.594426Z",
+      "plan_key":  "REGR-MAIN-CI"
+    },
+    {
+      "id":  "ced4c835-6da2-4931-9f2c-b14c23bedf60",
+      "project_id":  "62f171a7-1934-4d35-a8a0-86afdd74baa3",
+      "name":  "Smoke",
+      "description":  "capture fixture",
+      "created_at":  "2026-08-31T12:41:18.593356Z",
+      "updated_at":  "2026-08-31T12:41:18.593356Z",
+      "plan_key":  "SMOKE"
+    }
+  ]
+}
