@@ -17,9 +17,36 @@ import (
 // "safe to create".
 var ErrPlanNotFound = errors.New("plan not found")
 
+// ErrPlanCasesUnusable reports that the plan was read but its cases cannot be
+// turned into short codes — the server sent rows without one.
+//
+// Distinct from a plan that is genuinely empty, and the distinction is the
+// whole point (OB-852): a broken contract and an unattached plan used to
+// produce the same output, while the caller's next move differs — attach
+// cases, or go and fix the server. Callers that must tell them apart use
+// errors.Is.
+//
+// One shape this does NOT catch, and cannot: a response with no `cases` key at
+// all. The gateway omits an empty array (EmitUnpopulated is off), so an empty
+// plan and a `cases` that moved or was renamed arrive identically on the wire,
+// and nothing in the body says how many cases the plan holds. That is the
+// shape the original bug took, so it is worth closing — it needs a count on
+// the plan itself, which is a server change. Tracked separately; until then
+// this guard covers rows-without-codes only. Tracked as OB-857.
+var ErrPlanCasesUnusable = errors.New("plan cases carry no short code")
+
 // Plan is the subset of the Observo Plan shape the CLI consumes.
-// Cases is the snapshot at fetch time — server returns the same short
-// codes that `create run --plan KEY` would seed into a new run.
+//
+// Cases is the snapshot at fetch time, populated by GetPlan from the response's
+// top-level `cases` array — NOT from a `cases` field inside `plan`, which the
+// server has never sent.
+//
+// Cases is trustworthy ONLY on a value returned by GetPlan or GetPlanByKey.
+// ListPlans and CreatePlan hand back a Plan with Cases nil, because neither
+// response carries cases at all (ListTestPlansResponse holds bare plan rows;
+// CreateTestPlanResponse has no `cases` sibling). Empty there means "not
+// asked for", not "no cases" — read the plan if you need them. Nothing reads
+// Cases off those two paths today; this comment is here so nothing starts to.
 type Plan struct {
 	ID      string     `json:"id"`
 	PlanKey string     `json:"plan_key"`
@@ -28,15 +55,64 @@ type Plan struct {
 }
 
 // PlanCase carries the minimum a CI consumer needs to filter tests.
-// Title is included for nicer CLI output; consumers that only need the
-// grep regex ignore it.
+//
+// Short code only: this used to also carry a Title, which the server has never
+// sent on a plan-case row (pb.TestPlanCase has no such field). A field that is
+// always empty is the same trap as the one OB-852 is about, one size down, so
+// it is gone rather than left to be read as "this case has no title".
 type PlanCase struct {
 	ShortCode string `json:"short_code"`
-	Title     string `json:"title,omitempty"`
 }
 
+// planCaseWire is a plan-case row as GetTestPlan actually sends it — a sibling
+// of `plan`, not a member of it. See testdata/plan_get_response.json, a
+// verbatim capture of a real response body.
+//
+// TestCaseID is decoded but unused: it is what the row carried BEFORE OB-852
+// added a short code, and naming it here keeps the wire shape legible next to
+// the field that replaced it for this purpose.
+type planCaseWire struct {
+	TestCaseID string `json:"test_case_id"`
+	ShortCode  string `json:"short_code"`
+}
+
+// getPlanResponse mirrors pb.GetTestPlanResponse: `plan` and `cases` are
+// siblings. The CLI used to declare `cases` inside Plan and read plan.Cases,
+// which is always nil against the real server — every plan looked empty, and
+// `plan resolve --format grep` answered with its never-match sentinel. Nothing
+// caught it because the test encoded the CLI's own Plan struct as the response
+// body, so the client was only ever parsing a shape it had defined itself.
 type getPlanResponse struct {
-	Plan Plan `json:"plan"`
+	Plan  Plan           `json:"plan"`
+	Cases []planCaseWire `json:"cases"`
+}
+
+// planCasesFromWire projects the wire rows onto the shape the CLI consumes,
+// refusing anything a short-code filter cannot be built from.
+//
+// Strict about a missing code on purpose: dropping the offending rows and
+// keeping the rest would emit a filter that runs SOME of the plan while
+// reporting the plan ran — the quiet under-run this ticket exists to remove. A
+// plan with no rows at all is not an error; it is an empty plan.
+func planCasesFromWire(rows []planCaseWire) ([]PlanCase, error) {
+	if len(rows) == 0 {
+		return nil, nil
+	}
+	out := make([]PlanCase, 0, len(rows))
+	missing := 0
+	for _, r := range rows {
+		if r.ShortCode == "" {
+			missing++
+			continue
+		}
+		out = append(out, PlanCase{ShortCode: r.ShortCode})
+	}
+	if missing > 0 {
+		return nil, fmt.Errorf("%w: %d of %d plan case(s) came back without one; "+
+			"a filter built from the remaining %d would silently under-run the plan",
+			ErrPlanCasesUnusable, missing, len(rows), len(out))
+	}
+	return out, nil
 }
 
 type listPlansResponse struct {
@@ -67,7 +143,13 @@ func (c *Client) GetPlan(ctx context.Context, projectID, planID string) (*Plan, 
 	if resp.Plan.ID == "" {
 		return nil, errors.New("GetPlan: response missing plan.id")
 	}
-	return &resp.Plan, nil
+	cases, err := planCasesFromWire(resp.Cases)
+	if err != nil {
+		return nil, fmt.Errorf("GetPlan %s: %w", planID, err)
+	}
+	plan := resp.Plan
+	plan.Cases = cases
+	return &plan, nil
 }
 
 // ListPlans returns all plans in a project. Used by GetPlanByKey to
@@ -89,9 +171,9 @@ func (c *Client) ListPlans(ctx context.Context, projectID string) ([]Plan, error
 // GetPlanByKey is the human-friendly resolver `plan resolve` uses. If
 // the input parses as a UUID, it goes directly through GetPlan;
 // otherwise it lists project plans, filters by plan_key, and re-fetches
-// the matched plan by UUID (the list response isn't guaranteed to
-// include the full Cases array, so the second hop is required for
-// consumers like --format=grep).
+// the matched plan by UUID (ListTestPlans returns plan rows only — no
+// `cases` sibling at all — so the second hop is required for consumers
+// like --format=grep).
 //
 // Two round-trips for keys, one for UUIDs. Acceptable until the server
 // accepts plan_key on GET.
@@ -134,6 +216,9 @@ type createPlanBody struct {
 // CreatePlan creates a plan (optionally seeded with ordered case UUIDs) via
 // POST /api/projects/{project_id}/plans. Used by `jvm import --chain=flat` to
 // preserve an order-dependent chain's sequence as a plan.
+//
+// The returned Plan has Cases nil — CreateTestPlanResponse carries no cases,
+// even when the create seeded some. Re-read with GetPlan to see them.
 func (c *Client) CreatePlan(ctx context.Context, projectID, planKey, name string, caseIDs []string) (*Plan, error) {
 	if projectID == "" {
 		return nil, errors.New("CreatePlan: project_id required")
