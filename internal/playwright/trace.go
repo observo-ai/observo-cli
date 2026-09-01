@@ -13,8 +13,8 @@ import (
 // `trace.zip`'s `trace.trace` stream. Mirrors the shape the FE Wave 0c
 // viewer (OB-349) will consume — minimal but enough for filter UX.
 type ConsoleEntry struct {
-	Timestamp float64 `json:"ts"`              // ms since trace epoch
-	Level     string  `json:"level"`           // log | warn | error | info | debug | trace
+	Timestamp float64 `json:"ts"`    // ms since trace epoch
+	Level     string  `json:"level"` // log | warn | error | info | debug | trace
 	Message   string  `json:"message"`
 	Location  string  `json:"location,omitempty"` // url:line:column (best-effort)
 }

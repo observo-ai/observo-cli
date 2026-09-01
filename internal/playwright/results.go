@@ -66,16 +66,16 @@ type Test struct {
 // is the definitive outcome; earlier entries are retries we surface
 // only to attribute trace.zip / video.webm to the right attempt.
 type TestResult struct {
-	WorkerIndex int             `json:"workerIndex,omitempty"`
-	Status      string          `json:"status"` // passed | failed | timedOut | skipped | interrupted
-	Duration    int64           `json:"duration,omitempty"` // ms
-	Retry       int             `json:"retry"`
-	StartTime   string          `json:"startTime,omitempty"`
-	Errors      []PWError       `json:"errors,omitempty"`
-	Attachments []PWAttachment  `json:"attachments,omitempty"`
-	Steps       []TestStep      `json:"steps,omitempty"`
-	Stdout      []OutputChunk   `json:"stdout,omitempty"`
-	Stderr      []OutputChunk   `json:"stderr,omitempty"`
+	WorkerIndex int            `json:"workerIndex,omitempty"`
+	Status      string         `json:"status"`             // passed | failed | timedOut | skipped | interrupted
+	Duration    int64          `json:"duration,omitempty"` // ms
+	Retry       int            `json:"retry"`
+	StartTime   string         `json:"startTime,omitempty"`
+	Errors      []PWError      `json:"errors,omitempty"`
+	Attachments []PWAttachment `json:"attachments,omitempty"`
+	Steps       []TestStep     `json:"steps,omitempty"`
+	Stdout      []OutputChunk  `json:"stdout,omitempty"`
+	Stderr      []OutputChunk  `json:"stderr,omitempty"`
 }
 
 // PWAttachment is the JSON reporter's view of an attachment the test

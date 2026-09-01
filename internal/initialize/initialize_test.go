@@ -360,9 +360,9 @@ export default defineConfig({
 
 func TestMaskComments(t *testing.T) {
 	cases := []struct {
-		name     string
-		in       string
-		want     string
+		name string
+		in   string
+		want string
 	}{
 		{"plain", "abc", "abc"},
 		{"single-line comment", "abc // hi", "abc      "},
@@ -568,15 +568,15 @@ func TestValidatePlanKey(t *testing.T) {
 		}
 	}
 	bad := []string{
-		"",                  // empty
-		"lowercase",         // lowercase not allowed (would survive but PRD says uppercase)
-		"with space",        // space
-		"with:colon",        // YAML mapping ambiguity
-		"with'quote",        // would break single-quoted YAML embed
-		"*alias",            // YAML alias syntax
-		"&anchor",           // YAML anchor syntax
-		"-leading-dash",     // starts with dash → flag confusion in shell
-		"plan/with/slash",   // path-like
+		"",                // empty
+		"lowercase",       // lowercase not allowed (would survive but PRD says uppercase)
+		"with space",      // space
+		"with:colon",      // YAML mapping ambiguity
+		"with'quote",      // would break single-quoted YAML embed
+		"*alias",          // YAML alias syntax
+		"&anchor",         // YAML anchor syntax
+		"-leading-dash",   // starts with dash → flag confusion in shell
+		"plan/with/slash", // path-like
 	}
 	for _, k := range bad {
 		if err := ValidatePlanKey(k); err == nil {

@@ -1129,8 +1129,8 @@ func TestUploadExtractedJSON_ConcurrentInvocationsKeepContentIntegrity(t *testin
 		Body any `json:"-"`
 	}
 	var (
-		mu       sync.Mutex
-		uploads  []string // captured base64-decoded content of each upload
+		mu      sync.Mutex
+		uploads []string // captured base64-decoded content of each upload
 	)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
