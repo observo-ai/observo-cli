@@ -230,6 +230,80 @@ func TestDoJSON_BodyTruncation(t *testing.T) {
 	}
 }
 
+// OB-860: a SUCCESSFUL body bigger than the error-quote limit has to decode in
+// full. The test above only ever proved that an ERROR body is shortened, and
+// the two limits used to be the same number — so every 2xx over 2 KB was read
+// through the same limiter and unmarshalled from the truncated bytes. Nothing
+// in this package failed; `observo plan resolve` did, against any project with
+// more than a couple of kilobytes of plans.
+func TestDoJSON_DecodesABodyLargerThanTheErrorQuoteLimit(t *testing.T) {
+	// Shaped like the response that actually broke: a list whose rows carry
+	// long prose descriptions. The padding sits INSIDE a string value, so a
+	// truncated read cuts mid-token and cannot parse.
+	type row struct {
+		Key         string `json:"plan_key"`
+		Description string `json:"description"`
+	}
+	type payload struct {
+		Plans []row `json:"plans"`
+	}
+	want := payload{Plans: []row{
+		{Key: "REGR-MAIN-CI", Description: strings.Repeat("x", BodyMaxLen*2)},
+		{Key: "smoke", Description: "short"},
+	}}
+	encoded, err := json.Marshal(want)
+	if err != nil {
+		t.Fatalf("marshal fixture: %v", err)
+	}
+	if len(encoded) <= BodyMaxLen {
+		t.Fatalf("fixture must exceed BodyMaxLen to prove anything (got %d)", len(encoded))
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(encoded)
+	}))
+	defer srv.Close()
+
+	c := newClient(t, srv.URL)
+	var got payload
+	if err := c.DoJSON(context.Background(), http.MethodGet, "/x", nil, &got); err != nil {
+		t.Fatalf("DoJSON: %v", err)
+	}
+	if len(got.Plans) != len(want.Plans) {
+		t.Fatalf("got %d plans, want %d", len(got.Plans), len(want.Plans))
+	}
+	// The LAST row is the one a truncated read loses, and the long value is
+	// what a mid-token cut destroys — assert both, not just the count.
+	if got.Plans[1].Key != "smoke" {
+		t.Errorf("last row lost: got %q", got.Plans[1].Key)
+	}
+	if got.Plans[0].Description != want.Plans[0].Description {
+		t.Errorf("long value did not survive: got %d chars, want %d",
+			len(got.Plans[0].Description), len(want.Plans[0].Description))
+	}
+}
+
+// The other half of the same rule: the read is still bounded, and a body over
+// that bound is refused rather than half-decoded.
+func TestDoJSON_RefusesABodyOverTheReadLimit(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"plans":[{"plan_key":"` + strings.Repeat("y", ResponseReadLimit) + `"}]}`))
+	}))
+	defer srv.Close()
+
+	c := newClient(t, srv.URL)
+	var out map[string]any
+	err := c.DoJSON(context.Background(), http.MethodGet, "/x", nil, &out)
+	if err == nil {
+		t.Fatal("expected a refusal for an oversized body")
+	}
+	if !strings.Contains(err.Error(), "larger than") {
+		t.Errorf("the error should say the body was too large, got %v", err)
+	}
+}
+
 func TestDoJSON_NilOutDiscardsResponseBody(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

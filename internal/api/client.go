@@ -21,6 +21,24 @@ import (
 	"time"
 )
 
+// ResponseReadLimit bounds how much of a response body is read at all. It
+// exists so a runaway or hostile response cannot exhaust memory, and it is a
+// DIFFERENT limit from BodyMaxLen, which bounds how much of a body is quoted
+// back inside an error message.
+//
+// OB-860: those two were the same number, so every response — successful ones
+// included — was read through a 2 KB limiter and then unmarshalled from the
+// truncated bytes. Any JSON over 2 KB came back as "decode response:
+// unexpected end of JSON input", which is what stopped `plan resolve` from
+// resolving a real project's plans (the OB project's list is about 3 KB) and
+// kept CI's REGR-MAIN-CI tier falling back to @prod-safe.
+//
+// 8 MiB rather than something snug: the ceiling is here to stop a pathological
+// response, not to express an expectation about any endpoint. A limit tight
+// enough to be reached by ordinary data is a limit that will silently break a
+// command the first time somebody's project grows.
+const ResponseReadLimit = 8 << 20
+
 // Client wraps an *http.Client with auth + retry. Safe for concurrent use
 // (matches stdlib *http.Client semantics).
 type Client struct {
@@ -148,9 +166,16 @@ func (c *Client) doOnce(ctx context.Context, method, url string, body []byte, ou
 	}
 	defer resp.Body.Close()
 
-	respBody, readErr := io.ReadAll(io.LimitReader(resp.Body, BodyMaxLen+1))
+	respBody, readErr := io.ReadAll(io.LimitReader(resp.Body, ResponseReadLimit+1))
 	if readErr != nil {
 		return fmt.Errorf("read response: %w", readErr)
+	}
+	// Refused rather than truncated. Decoding what fits is how this went wrong
+	// in the first place: a body cut mid-token produces a JSON error that
+	// describes the CLI's own limit as though the server had sent something
+	// malformed.
+	if len(respBody) > ResponseReadLimit {
+		return fmt.Errorf("response from %s is larger than %d bytes", url, ResponseReadLimit)
 	}
 	c.logf("← %d %s (body=%d bytes)", resp.StatusCode, url, len(respBody))
 
