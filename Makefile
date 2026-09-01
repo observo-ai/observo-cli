@@ -26,4 +26,8 @@ release-dryrun: ## GoReleaser dry-run that DOES sign/upload to staging (CI-only 
 
 lint: ## Run go vet (golangci-lint optional, install separately)
 	go vet ./...
-	@command -v golangci-lint >/dev/null && golangci-lint run ./... || echo "(skipped golangci-lint — not installed)"
+	@if command -v golangci-lint >/dev/null; then \
+		golangci-lint run ./...; \
+	else \
+		echo "(skipped golangci-lint — not installed)"; \
+	fi
