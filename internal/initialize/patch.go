@@ -86,7 +86,7 @@ func PatchPlaywrightConfig(path string) (*PatchResult, error) {
 		return &PatchResult{
 			Path: path, Original: original, NewContent: original,
 			Changed: false,
-			Reason: "reporter array opening `[` found but no matching `]` — config syntax may be invalid; aborting patch",
+			Reason:  "reporter array opening `[` found but no matching `]` — config syntax may be invalid; aborting patch",
 		}, nil
 	}
 	inside := original[start:end]

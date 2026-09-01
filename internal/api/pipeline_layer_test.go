@@ -31,9 +31,9 @@ func TestPatchPipelineLayer_PathBodyShape(t *testing.T) {
 		RunID:     "run-uuid",
 		LayerID:   "frontend-unit",
 		Layer: PipelineLayer{
-			DisplayName:       "Frontend (Vitest)",
-			Framework:         "vitest",
-			Total:             10, Passed: 9, Failed: 1, DurationMs: 1200,
+			DisplayName: "Frontend (Vitest)",
+			Framework:   "vitest",
+			Total:       10, Passed: 9, Failed: 1, DurationMs: 1200,
 			JunitAttachmentID: "junit-att-id",
 			Coverage:          &LayerCoverage{LcovAttachmentID: "lcov-att-id"},
 		},

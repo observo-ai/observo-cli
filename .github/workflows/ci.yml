@@ -1,0 +1,77 @@
+# OB-861: the checks that decide whether this repo's code works.
+#
+# Until now a pull request here went green on CodeQL and the auto-reviewer
+# alone — nothing built the module on purpose, nothing ran the suite, nothing
+# looked at formatting. That is how OB-860 shipped: every response over 2 KB
+# was read through the error-quote limiter and then decoded, which broke
+# `observo plan resolve` against every real project. A regression test for it
+# exists now and would have failed on the PR that introduced it, if anything
+# had run it.
+#
+# The monorepo consumes this repo as a PINNED RELEASE in two places, so a
+# defect here reaches its CI as a version bump that looks routine. The release
+# workflow is not the place to catch that: by then the tag exists.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# A force-push supersedes its own earlier run; nothing here writes anywhere, so
+# cancelling one costs nothing but the minutes it frees.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: build, vet, gofmt, test
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # go-version-file, not a literal: the release workflow already resolves
+      # the toolchain this way, and two places naming a version separately is
+      # how CI comes to test something the release does not build.
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build
+        run: go build ./...
+
+      - name: Vet
+        run: go vet ./...
+
+      # The tracked .go files rather than `gofmt -l .`, so a local dist/ or any
+      # other build output in the working tree cannot be reported as a source
+      # file the author is expected to format.
+      #
+      # Fed through xargs -0 rather than a bare command substitution: the shell
+      # would split the list on whitespace, which is the behaviour wanted right
+      # up until a path contains a space, and `-r` keeps gofmt from falling back
+      # to reading stdin if the list is ever empty.
+      #
+      # gofmt exits 0 whether or not it names anything, so the file list IS the
+      # result and has to be turned into the failure itself.
+      - name: Gofmt
+        run: |
+          unformatted=$(git ls-files -z '*.go' | xargs -0 -r gofmt -l)
+          if [ -n "$unformatted" ]; then
+            echo "::error::gofmt would rewrite these files; run 'gofmt -w' on them"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      # -race because the cost is a few seconds on a suite this size, and the
+      # first concurrency bug it catches pays for every run that found nothing.
+      # -count=1 so a cached PASS is never mistaken for a run.
+      - name: Test
+        run: go test -race -count=1 ./...

@@ -30,12 +30,12 @@ import (
 // supplies the plan name in the prompt.
 
 var (
-	initFlagPlan       string
-	initFlagFramework  string
-	initFlagYes        bool
-	initFlagPrint      bool
-	initFlagNoCommit   bool
-	initFlagNoInstall  bool
+	initFlagPlan      string
+	initFlagFramework string
+	initFlagYes       bool
+	initFlagPrint     bool
+	initFlagNoCommit  bool
+	initFlagNoInstall bool
 )
 
 var initCmd = &cobra.Command{
