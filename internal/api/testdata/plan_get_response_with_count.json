@@ -1,0 +1,30 @@
+{
+  "plan": {
+    "id": "193e2b1e-22a5-4732-9579-d2938b2c06b3",
+    "project_id": "8e7a2f4f-1682-4cc3-af20-8d89d03b93be",
+    "name": "Regression — main CI",
+    "description": "capture fixture",
+    "created_at": "2026-08-31T12:27:02.146197Z",
+    "updated_at": "2026-08-31T12:27:02.146197Z",
+    "plan_key": "REGR-MAIN-CI",
+    "case_count": 2
+  },
+  "cases": [
+    {
+      "id": "1c45dd23-5e96-4043-8d25-52c87ec46ca3",
+      "plan_id": "193e2b1e-22a5-4732-9579-d2938b2c06b3",
+      "test_case_id": "d5906119-a9fb-46e8-8602-738d6e129e3f",
+      "created_at": "2026-08-31T12:27:02.154220Z",
+      "updated_at": "2026-08-31T12:27:02.154220Z",
+      "short_code": "JFHYPGZZ-1"
+    },
+    {
+      "id": "0f02fcd5-0dd0-4f5e-9320-493016e8c310",
+      "plan_id": "193e2b1e-22a5-4732-9579-d2938b2c06b3",
+      "test_case_id": "3fcb52a6-8676-44b0-8726-7789e55e2b2e",
+      "created_at": "2026-08-31T12:27:02.161924Z",
+      "updated_at": "2026-08-31T12:27:02.161924Z",
+      "short_code": "JFHYPGZZ-2"
+    }
+  ]
+}
